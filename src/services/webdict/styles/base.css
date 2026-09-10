@@ -1,0 +1,46 @@
+/* 在线词典词条帧基础样式（iframe opaque origin 不继承父页，样式必须帧内自带）。
+   版式从 saladict shadow DOM 语义改写；白底配色对齐本地词典帧。 */
+
+body {
+  margin: 0;
+  padding: 8px 12px 12px;
+  font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.65;
+  color: #1f2328;
+  background: #fff;
+}
+
+h1, h2, h3, h4 { margin: 0.4em 0 0.3em; font-weight: 600; }
+p { margin: 0.35em 0; }
+a { color: #0b62d6; text-decoration: none; }
+a:hover { text-decoration: underline; }
+img { max-width: 100%; }
+ul, ol { margin: 0.3em 0; padding-left: 1.6em; }
+
+/* 分区框（saladict EntryBox 等价：标题条 + 上边分隔） */
+.webdict-box {
+  margin-top: 0.75em;
+  border-top: 1px solid #e8e8e8;
+  padding-top: 0.35em;
+}
+.webdict-box-title {
+  font-weight: 600;
+  color: #57606a;
+  font-size: 0.9em;
+  margin: 0.1em 0 0.3em;
+}
+
+/* 发音喇叭（webaudio:// 锚点统一占位，对齐 saladict Speaker 手法） */
+.webdict-Speaker {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: -2px;
+  color: #4b9e5f;
+  margin: 0 2px;
+  cursor: pointer;
+}
+.webdict-Speaker:hover {
+  color: #2e7d3c;
+  text-decoration: none;
+}

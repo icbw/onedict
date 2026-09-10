@@ -1,0 +1,69 @@
+/*
+ * onedict 全局样式（视觉还原基建； UI 去 cherry 化：
+ * 语义 token 改自研 packages/ui/src/styles/theme.css，一层直定义）。
+ * 层序沿用 pickdict：properties 最弱，app 层承载应用自有规则；
+ * 三个窗口共用本入口；浮标窗口的透明底由 ToolbarApp 挂载时覆盖。
+ */
+@layer properties, theme, base, components, utilities, app;
+
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "../../packages/ui/src/styles/theme.css";
+
+/* @onedict/ui 为源码直引（无 dist），类名扫描覆盖其组件源码 */
+@source "../../packages/ui/src/components/*.tsx";
+
+@custom-variant dark (&:is(.dark *));
+
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  /* Tooltip 白底主题已内建进 @onedict/ui tooltip 原语（bg-popover + 细边 + 轻阴影），
+     此处不再需要全局覆写。 */
+}
+
+@layer app {
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    overflow: hidden;
+    font-family:
+      system-ui,
+      "Segoe UI",
+      "Microsoft YaHei",
+      sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    text-rendering: optimizeLegibility;
+
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+
+    /* 桌面应用体感：外层禁止 accidental 选区；输入类元素与词条 iframe 内部不受影响 */
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  input,
+  textarea,
+  [contenteditable="true"] {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  *:focus {
+    outline-style: none;
+  }
+
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+}

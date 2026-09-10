@@ -1,0 +1,51 @@
+# rust
+/target
+**/target
+**/*.rs.bk
+
+# test
+/tmp
+/tests/dicts/
+
+# auto-decompressed dict files
+*.dict
+!tests/fixtures/*.dict
+
+# node bindings
+/node/node_modules/
+/node/index.js
+/node/index.d.ts
+/node/*.node
+/node/*.tgz
+/node/package-lock.json
+/node/pnpm-lock.yaml
+/node/npm/*/*.node
+
+# expo module
+/expo/node_modules/
+/expo/build/
+/expo/package-lock.json
+/expo/*.tgz
+
+# examples
+/examples/node-test/node_modules/
+/examples/node-test/package-lock.json
+/examples/node-test/pnpm-lock.yaml
+/examples/expo-test/node_modules/
+/examples/expo-test/package-lock.json
+/examples/expo-test/.expo/
+/examples/expo-test/ios/
+/examples/expo-test/android/
+/examples/expo-test/dicts/*
+!/examples/expo-test/dicts/README.md
+
+# mobile generated bindings
+/mobile/bindings/
+/expo/ios/opendict_mobile.swift
+/expo/ios/opendict_mobileFFI.h
+/expo/ios/opendict_mobileFFI.modulemap
+/expo/ios/module.modulemap
+/expo/ios/opendict_mobile.xcframework/
+/expo/ios/libopendict_mobile.a
+/expo/android/src/main/java/uniffi/
+/expo/android/src/main/jniLibs/

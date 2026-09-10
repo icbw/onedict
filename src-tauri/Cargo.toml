@@ -1,0 +1,82 @@
+[package]
+name = "onedict"
+version = "0.1.15"
+description = "划词查词 / 词典 / 生词卡"
+authors = ["Bowen C"]
+edition = "2021"
+
+[lib]
+name = "onedict_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# 系统托盘（tray-icon）
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# 滚动文件日志（MIT）——release GUI 子系统无 stdout，现场问题经 app_data_dir/logs/ 诊断
+tracing-appender = "0.2"
+# 词典引擎（MIT）：crates.io opendict-rs 0.1.0 源码拷入 vendor/opendict，
+# 本地改造支持磁盘索引缓存（启动免解析，见 vendor/opendict/ONEDICT-NOTES.md）。
+opendict-rs = { path = "vendor/opendict" }
+regex = "1"
+base64 = "0.22"
+# 生词卡条目 id（对齐 pickdict randomUUID，MIT/Apache）
+uuid = { version = "1", features = ["v4"] }
+# AI：OpenAI 兼容流式代理（MIT/Apache）。Rust 侧发送请求绕 webview CORS（任意
+# OpenAI 兼容网关可用）；native-tls 走系统 schannel，无需 OpenSSL。SSE 手工解析，
+# 不引入 eventsource 等额外依赖。
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
+# 在线词典（webdict）：URL 构造与 host 解析（MIT/Apache-2.0；reqwest 传递依赖显式化）
+url = "2"
+# 全局快捷键（tauri 官方插件，MIT/Apache；仅 Rust 侧使用，不需 npm 包）
+tauri-plugin-global-shortcut = "2"
+# 单实例（官方插件，MIT/Apache）：多开会全局快捷键注册冲突 + JSON 并发写互覆
+tauri-plugin-single-instance = "2"
+# 数据可携（官方插件，MIT/Apache）：文件保存/打开对话框（备份导出/恢复/Anki CSV）
+tauri-plugin-dialog = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+# 版本对齐 tauri 既有依赖（Cargo.lock 已有 0.61.x），共享编译产物
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Security_Cryptography",
+  "Win32_System_Com",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+  "Win32_System_Ole",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+  "Win32_UI_Accessibility",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+  # OCR：WinRT 识别链（实测所需 feature 集；零体积增量——引擎在系统内）
+  "Media_Ocr",
+  "Globalization",
+  "Graphics_Imaging",
+  "Storage_Streams",
+] }
+
+[profile.release]
+# 编译提速：codegen-units=1 + fat LTO → thin LTO + 16 并行 codegen 单元，
+# 主 crate 编译时间显著下降；代价 = 体积略增（约 5-10%）、运行性能差异对 GUI 不可感知。
+# 首次构建因 profile 变更全量重编依赖。
+codegen-units = 16
+lto = "thin"
+strip = true
+
+# vendored 词典引擎（本地改造版）纳入 workspace，-p opendict-rs 可跑其单元测试
+[workspace]
+members = ["vendor/opendict"]

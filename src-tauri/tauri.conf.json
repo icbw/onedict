@@ -1,0 +1,71 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "onedict",
+  "version": "0.1.15",
+  "identifier": "com.onedict.app",
+  "build": {
+    "beforeDevCommand": "pnpm vite",
+    "devUrl": "http://localhost:1427",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "onedict",
+        "width": 980,
+        "height": 680
+      },
+      {
+        "label": "selection-toolbar",
+        "title": "onedict-toolbar",
+        "width": 320,
+        "height": 48,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focusable": false,
+        "focus": false,
+        "shadow": false,
+        "resizable": false
+      },
+      {
+        "label": "action-panel",
+        "title": "查词",
+        "width": 480,
+        "height": 600,
+        "visible": false,
+        "decorations": false,
+        "shadow": true,
+        "resizable": true,
+        "skipTaskbar": true
+      },
+      {
+        "label": "ocr-capture",
+        "title": "onedict-ocr",
+        "width": 400,
+        "height": 300,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": false,
+        "resizable": false,
+        "focus": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' data:; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost",
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' data:; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:1427 http://localhost:1427",
+      "dangerousDisableAssetCspModification": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"]
+  }
+}

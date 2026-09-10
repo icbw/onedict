@@ -1,0 +1,48 @@
+[package]
+name = "opendict-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Callum Gander <callumgander@protonmail.com>"]
+description = "Unified Rust reader for StarDict and MDict dictionaries"
+homepage = "https://github.com/callum-gander/opendict-rs"
+repository = "https://github.com/callum-gander/opendict-rs"
+documentation = "https://docs.rs/opendict-rs"
+readme = "README.md"
+license = "MIT"
+keywords = ["stardict", "mdict", "dictionary"]
+categories = ["parser-implementations", "text-processing"]
+exclude = [
+    "/expo",
+    "/node",
+    "/mobile",
+    "/examples/expo-test",
+    "/examples/node-test",
+    "/scripts",
+    "/docs",
+    "/tests/dicts",
+    "/.github",
+]
+
+[lib]
+name = "opendict"
+
+[dependencies]
+flate2 = "1"
+log = "0.4"
+memmap2 = "0.9"
+encoding_rs = "0.8"
+adler2 = "2"
+lzo1x = "0.2"
+
+[dependencies.xxhash-rust]
+version = "0.8"
+features = ["xxh64"]
+
+[dev-dependencies]
+tempfile = "3"
+criterion = "0.5"
+
+[[bench]]
+name = "dictionary"
+harness = false

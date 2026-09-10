@@ -1,0 +1,8 @@
+{
+  "name": "@onedict/ui",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "onedict 自研 UI 原语（shadcn 风格 + Radix，源码直引，无独立构建产物）",
+  "type": "module"
+}
