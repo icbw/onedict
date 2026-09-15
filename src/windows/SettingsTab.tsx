@@ -73,10 +73,12 @@ import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plug
 import { cn } from "../lib/utils";
 import { WEB_DICTS, webItemsFromDictItems } from "../services/webdict";
 import { DEFAULT_AI_DICT_PROMPT } from "./panel/AiDictSection";
+import AboutSection from "./panel/AboutSection";
+import { useUpdateAvailable } from "../lib/useUpdateAvailable";
 import type { AiPrefs, ApiType, DictItemPref, ModelCapability, ModelEntry, PrefsPayload, ProviderConfig } from "../types/prefs";
 import type { DictMeta } from "../types/dictionary";
 
-type Section = "models" | "selection" | "capture" | "dictionary" | "hotkeys" | "data";
+type Section = "models" | "selection" | "capture" | "dictionary" | "hotkeys" | "data" | "general" | "about";
 
 const SECTIONS: Array<{ value: Section; label: string }> = [
   { value: "models", label: "模型服务" },
@@ -85,6 +87,9 @@ const SECTIONS: Array<{ value: Section; label: string }> = [
   { value: "dictionary", label: "词典" },
   { value: "hotkeys", label: "快捷键" },
   { value: "data", label: "数据" },
+  // 通用殿后：默认落点（模型服务）不变；环境级开关与侧栏底部的版本/日志区相邻
+  { value: "general", label: "通用" },
+  { value: "about", label: "关于" },
 ];
 
 /** API 协议类型选项（值对齐 cherry ENDPOINT_TYPE 聊天三形态；顺序 = 默认优先）。
@@ -153,6 +158,9 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 export default function SettingsTab({ active = true }: { active?: boolean }) {
   const [section, setSection] = useState<Section>("models");
   const [appVersion, setAppVersion] = useState("");
+  // 启动检查命中（或本次会话已检出）时在「关于」项上标点；进过关于页即收起
+  const updateAvailable = useUpdateAvailable();
+  const [aboutSeen, setAboutSeen] = useState(false);
   // 偏好变更节拍（收尾实测修复）：prefs-changed 监听上提到常挂载的外壳。
   // 子页是条件渲染，SelectionSection 只在激活时挂载、自身监听不活——托盘/快捷键
   // 改划词开关时子页会错过事件，切回子页才看到新状态（实测坑）。tick 下发驱动
@@ -166,6 +174,10 @@ export default function SettingsTab({ active = true }: { active?: boolean }) {
       void unPrefs.then((f) => f(), () => {});
     };
   }, []);
+
+  useEffect(() => {
+    if (section === "about") setAboutSeen(true);
+  }, [section]);
 
   return (
     <div className="flex h-full min-h-0">
@@ -185,6 +197,9 @@ export default function SettingsTab({ active = true }: { active?: boolean }) {
               )}
             >
               {s.label}
+              {s.value === "about" && updateAvailable && !aboutSeen && (
+                <span className="ml-1.5 inline-block size-1.5 rounded-full bg-primary align-middle" />
+              )}
             </button>
           ))}
         </div>
@@ -198,9 +213,15 @@ export default function SettingsTab({ active = true }: { active?: boolean }) {
         >
           打开日志目录
         </button>
-        <p className="px-3 text-muted-foreground text-xs">
-          onedict{appVersion ? ` v${appVersion}` : ""}
-        </p>
+        <Tooltip content="查看版本与更新" placement="top-start">
+          <button
+            type="button"
+            onClick={() => setSection("about")}
+            className="w-full cursor-pointer rounded-md px-3 py-1.5 text-left text-muted-foreground text-xs transition-colors hover:bg-accent/60 hover:text-foreground"
+          >
+            onedict{appVersion ? ` v${appVersion}` : ""}
+          </button>
+        </Tooltip>
       </aside>
 
       {/* 子页内容 */}
@@ -211,8 +232,68 @@ export default function SettingsTab({ active = true }: { active?: boolean }) {
         {section === "dictionary" && <DictionarySection />}
         {section === "hotkeys" && <HotkeysSection prefsTick={prefsTick} />}
         {section === "data" && <DataSection />}
+        {section === "general" && <GeneralSection />}
+        {section === "about" && <AboutSection />}
       </div>
     </div>
+  );
+}
+
+/** 开机启动状态（对应 Rust `autostart::AutostartStatus`）：supported = false 时开关置灰，
+ *  原因见 reason（便携模式不注册） */
+interface AutostartStatus {
+  enabled: boolean;
+  supported: boolean;
+  reason: string;
+}
+
+/** 通用（环境级行为）。开机启动即改即存，状态回读以注册表实测为准——注册表是自启状态的
+ *  唯一事实源（不落偏好：偏好会随备份恢复到新机，注册表不会，双写即成幽灵态）。
+ *  开关含义只在 hover 说一句，组内不再重复（组描述与 hover 同义即冗余）。 */
+function GeneralSection() {
+  const [status, setStatus] = useState<AutostartStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    void invoke<AutostartStatus>("autostart_status")
+      .then(setStatus)
+      .catch((e) => setErr(String(e)));
+  }, []);
+
+  const toggle = (next: boolean) => {
+    setBusy(true);
+    setErr("");
+    void invoke<AutostartStatus>("autostart_set", { enabled: next })
+      .then(setStatus)
+      .catch((e) => setErr(String(e)))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <SettingsContentColumn>
+      <SettingGroup>
+        <SettingTitle>启动</SettingTitle>
+        <SettingRow className="mt-3">
+          <SettingRowTitle>开机启动</SettingRowTitle>
+          <Tooltip
+            content={
+              status?.supported === false
+                ? status.reason
+                : "登录 Windows 后自动启动 onedict"
+            }
+            placement="top"
+          >
+            <Switch
+              checked={status?.enabled ?? false}
+              disabled={status === null || !status.supported || busy}
+              onCheckedChange={toggle}
+            />
+          </Tooltip>
+        </SettingRow>
+        {err && <p className="mt-2 text-destructive text-xs">{err}</p>}
+      </SettingGroup>
+    </SettingsContentColumn>
   );
 }
 

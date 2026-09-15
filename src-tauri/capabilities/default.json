@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "onedict 默认能力：事件监听/派发与核心窗口能力（P1 划词事件链依赖 core:event）",
+  "description": "onedict 默认能力：事件监听/派发与核心窗口能力（划词事件链依赖 core:event）",
   "windows": ["main", "selection-toolbar", "action-panel", "ocr-capture"],
   "permissions": [
     "core:default",

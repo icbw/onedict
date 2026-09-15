@@ -1,6 +1,6 @@
 [package]
 name = "onedict"
-version = "0.1.15"
+version = "0.1.16"
 description = "划词查词 / 词典 / 生词卡"
 authors = ["Bowen C"]
 edition = "2021"
@@ -41,6 +41,19 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
 # 数据可携（官方插件，MIT/Apache）：文件保存/打开对话框（备份导出/恢复/Anki CSV）
 tauri-plugin-dialog = "2"
+# 开机启动（官方插件，Apache-2.0 OR MIT，传递依赖 auto-launch MIT / winreg MIT）：
+# Windows 写 HKCU Run 项；值名 = productName，与 NSIS 模板自带的卸载清理
+# （installer.nsi 按 ${PRODUCTNAME} 删 Run 值，升级时 $UpdateMode 守卫保留）天然对齐，
+# 无需 installerHooks。仅 Rust 侧调用，不走插件 IPC，故不加 autostart 权限。
+tauri-plugin-autostart = "2"
+# 应用内更新（官方插件，Apache-2.0 OR MIT）：检查 / 下载 / minisign 验签 / NSIS
+# 覆盖安装（/P /UPDATE /R）由插件承担，本仓在 update.rs 包装为自建命令（同样不走
+# 插件 IPC）。关掉默认的 rustls-tls 与 zip：TLS 复用 reqwest 既有 native-tls
+# （schannel，不新引 rustls/ring），zip 只服务 Tauri v1 的压缩更新包，本仓直传 .exe。
+tauri-plugin-updater = { version = "2", default-features = false, features = [
+  "native-tls",
+  "system-proxy",
+] }
 
 [dev-dependencies]
 tempfile = "3"

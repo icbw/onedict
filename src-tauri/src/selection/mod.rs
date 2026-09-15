@@ -138,7 +138,7 @@ pub fn init(app: AppHandle) {
     let (tx, rx) = std::sync::mpsc::sync_channel::<WorkerMsg>(32);
     capture::spawn(app.clone(), rx);
     hook::start(tx);
-    clipmon::spawn(); // 第五批④：剪贴板监听（默认关，restore_from_prefs 按偏好开启）
+    clipmon::spawn(); // 剪贴板监听（默认关，restore_from_prefs 按偏好开启）
     ENABLED.store(true, std::sync::atomic::Ordering::SeqCst);
     #[cfg(debug_assertions)]
     selftest_emit(app.clone());

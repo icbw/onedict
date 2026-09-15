@@ -1,4 +1,5 @@
 mod ai;
+mod autostart;
 mod data;
 mod dictionary;
 mod fsutil;
@@ -10,6 +11,7 @@ mod reviewlog;
 mod selection;
 mod sys;
 mod tray;
+mod update;
 mod vocabulary;
 mod webdict;
 
@@ -61,6 +63,16 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         // 数据可携：文件保存/打开对话框（备份导出/恢复/Anki CSV）
         .plugin(tauri_plugin_dialog::init())
+        // 开机启动：注册项读写由 autostart 模块按环境守卫调用；
+        // `--autostart` 随注册值写入 Run 项，启动期据此识别「本次由登录自启拉起」
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![autostart::AUTOSTART_ARG]),
+        ))
+        // 应用内更新：端点与公钥取 tauri.conf.json 的 plugins.updater
+        // （公钥必填——缺该段插件初始化即反序列化失败）；能力经自建命令暴露，
+        // 不注册插件 IPC 权限
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // 数据根目录（dev/release 分流，见 paths::data_root）：logs 与全部
             // JSON 数据/词典缓存的统一根。logs 失败兜底相对目录（tracing 未就绪
@@ -92,6 +104,15 @@ pub fn run() {
                         .with_writer(file_writer),
                 )
                 .init();
+            // 登录自启（Run 值带 --autostart）：不弹主窗，静默驻留托盘（划词/托盘
+            // 服务照常启动）。窗口在 Builder::build 内创建而 setup 早于事件循环，
+            // 此处 hide 不产生首帧闪窗。
+            if std::env::args().any(|a| a == autostart::AUTOSTART_ARG) {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+                tracing::info!(target: "app", "登录自启：静默启动到托盘");
+            }
             //  生词卡存储：数据根/vocabulary.json（JSON 单文件，schema 沿用 pickdict）；
             // prefs / dict-cache / review-log / history 同根（全部走 dev/release 分流）
             let data_dir = root.map_err(|e| format!("取数据目录失败: {e}"))?;
@@ -134,6 +155,8 @@ pub fn run() {
             tray::register_hotkeys(app.handle());
             // 词典预热（后台低优先级，延迟 2.5s）：主启动流程不等待，前台首帧不被抢 CPU
             dictionary::spawn_warmup(app.handle().clone());
+            // 更新检查（偏好开启时，默认关）：延迟后台执行，结果广播 `update-available`
+            update::spawn_startup_check(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -175,6 +198,8 @@ pub fn run() {
             sys::app_restart,
             sys::clipboard_write,
             sys::clipboard_write_image,
+            autostart::autostart_status,
+            autostart::autostart_set,
             ocr::ocr_screen_snapshot,
             ocr::ocr_focus_capture,
             prefs::prefs_get,
@@ -194,6 +219,7 @@ pub fn run() {
             prefs::prefs_set_ocr_target_lang,
             prefs::prefs_set_ocr_vision_model,
             prefs::prefs_set_ocr_auto_recognize,
+            prefs::prefs_set_check_update_on_startup,
             ocr::ocr_recognize_region,
             ocr::ocr_capture_region,
             ocr::ocr_recognize_captured,
@@ -212,6 +238,11 @@ pub fn run() {
             data::data_migrate,
             data::data_reset_location,
             data::vocabulary_export_anki,
+            update::update_env,
+            update::update_pending,
+            update::update_check,
+            update::update_download,
+            update::update_install,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

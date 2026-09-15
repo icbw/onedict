@@ -8,7 +8,7 @@
  * 用户修订：复习并入生词本（统计头 + 单元制 + 学习卡弹窗），
  * 导航删「复习」；生词本点词 → lookupReq 管道跳词典页查词（seq 去重防同词重放）。
  */
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   BookMarked,
   BookOpenText,
@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { Tooltip } from "@onedict/ui/components/tooltip";
 import { cn } from "../lib/utils";
+import { useUpdateAvailable } from "../lib/useUpdateAvailable";
 import DictionaryTab from "./DictionaryTab";
 import VocabularyTab from "./VocabularyTab";
 import TranslateTab from "./TranslateTab";
@@ -35,6 +36,13 @@ export interface LookupRequest {
 export default function MainApp() {
   const [tab, setTab] = useState<Tab>("dictionary");
   const [lookupReq, setLookupReq] = useState<LookupRequest | null>(null);
+  // 启动检查命中（偏好「启动时检查更新」开启才可能发生）：在设置入口标点，进设置即收起
+  const updateAvailable = useUpdateAvailable();
+  const [updateSeen, setUpdateSeen] = useState(false);
+
+  useEffect(() => {
+    if (tab === "settings") setUpdateSeen(true);
+  }, [tab]);
 
   /** 生词本点词 → 切词典页并查词 */
   const openLookup = useCallback((word: string) => {
@@ -77,6 +85,7 @@ export default function MainApp() {
           icon={Settings}
           label="设置"
           active={tab === "settings"}
+          dot={updateAvailable && !updateSeen}
           onClick={() => setTab("settings")}
         />
       </nav>
@@ -111,11 +120,14 @@ function NavBtn({
   label,
   active,
   onClick,
+  dot = false,
 }: {
   icon: typeof Settings;
   label: string;
   active: boolean;
   onClick: () => void;
+  /** 未读点（新版本待查看） */
+  dot?: boolean;
 }) {
   return (
     <Tooltip content={label} placement="right">
@@ -125,13 +137,16 @@ function NavBtn({
         aria-current={active || undefined}
         onClick={onClick}
         className={cn(
-          "flex size-9 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors",
+          "relative flex size-9 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors",
           active
             ? "bg-primary text-white shadow-sm"
             : "hover:bg-accent/60 hover:text-foreground",
         )}
       >
         <Icon className="size-[18px]" />
+        {dot && (
+          <span className="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-primary ring-2 ring-muted" />
+        )}
       </button>
     </Tooltip>
   );

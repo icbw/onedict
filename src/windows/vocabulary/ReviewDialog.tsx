@@ -240,7 +240,7 @@ export default function ReviewDialog({
     const next = applySm2(card, g);
     const updated = await invoke<VocabularyEntry>("vocabulary_review", {
       id: card.id,
-      next: { ...next, grade: g }, // 学习统计（第五批⑤）：评分随调度一并提交记录
+      next: { ...next, grade: g }, // 学习统计：评分随调度一并提交记录
     });
     setReviewedCount((n) => n + 1);
     if (g === "again") {

@@ -103,6 +103,9 @@ pub struct Preferences {
     /// 扫描不再发现（文件保留在磁盘）；换词典根目录时清空（全新视图）
     #[serde(default)]
     pub removed_dicts: Vec<String>,
+    /// 启动时检查更新（默认关——无提示的后台请求按需开启；开关只在下次启动生效）
+    #[serde(default)]
+    pub check_update_on_startup: bool,
     // ── legacy 字段（反序列化捕获后由 migrate_web_dicts 迁入 dict_items，不再序列化）──
     #[serde(default, skip_serializing)]
     pub web_dicts: Option<Vec<WebDictItemPref>>,
@@ -132,6 +135,7 @@ impl Default for Preferences {
             selection_filter_mode: "default".into(),
             selection_filter_list: Vec::new(),
             removed_dicts: Vec::new(),
+            check_update_on_startup: false,
             ocr_lang: String::new(),
             ocr_target_lang: String::new(),
             ocr_vision_model: String::new(),
@@ -792,6 +796,7 @@ pub struct PrefsPayload {
     pub ocr_target_lang: String,
     pub ocr_vision_model: String,
     pub ocr_auto_recognize: bool,
+    pub check_update_on_startup: bool,
 }
 
 /// 偏好快照。**未初始化时返回 Err**：旧实现在此静默返回默认值，前端
@@ -829,6 +834,7 @@ pub fn prefs_get() -> Result<PrefsPayload, String> {
         ocr_target_lang: p.ocr_target_lang,
         ocr_vision_model: p.ocr_vision_model,
         ocr_auto_recognize: p.ocr_auto_recognize,
+        check_update_on_startup: p.check_update_on_startup,
     })
 }
 
@@ -927,6 +933,18 @@ pub fn prefs_set_review_auto_pronounce(app: tauri::AppHandle, enabled: bool) {
         tracing::warn!(target: "prefs", error = %e, "prefs-changed 广播失败");
     }
     tracing::info!(target: "prefs", enabled, "review auto pronounce updated");
+}
+
+/// 保存「启动时检查更新」开关（广播 prefs-changed 即时回读；检查动作本身
+/// 只在下次启动执行——设置页内仍可手动检查）
+#[tauri::command]
+pub fn prefs_set_check_update_on_startup(app: tauri::AppHandle, enabled: bool) {
+    update(|p| p.check_update_on_startup = enabled);
+    use tauri::Emitter;
+    if let Err(e) = app.emit("prefs-changed", ()) {
+        tracing::warn!(target: "prefs", error = %e, "prefs-changed 广播失败");
+    }
+    tracing::info!(target: "prefs", enabled, "check update on startup updated");
 }
 
 /// 保存词典外链走向开关（true = 浏览器打开，false = 转词典内部查词；

@@ -34,11 +34,22 @@ pub const DATA_ROOT_POINTER: &str = "data-root.txt";
 /// app_data_dir 的等价路径（Windows = `%APPDATA%\<identifier>`）。
 pub const APP_IDENTIFIER: &str = "com.onedict.app";
 
+/// exe 所在目录（便携标记探测；不可得 → None）
+fn exe_dir() -> Option<std::path::PathBuf> {
+    Some(std::env::current_exe().ok()?.parent()?.to_path_buf())
+}
+
+/// 便携模式是否生效（exe 同目录存在标记文件）。开机启动据此拒绝注册：
+/// 自启项存的是 exe 绝对路径，便携目录整体移动后即指向失效路径。
+pub fn is_portable() -> bool {
+    exe_dir().is_some_and(|dir| dir.join(PORTABLE_MARKER).is_file())
+}
+
 /// 便携模式数据根 = exe 同目录 `Data\`（无标记文件 → None）
 fn portable_root() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    dir.join(PORTABLE_MARKER).is_file().then(|| dir.join("Data"))
+    exe_dir()
+        .filter(|dir| dir.join(PORTABLE_MARKER).is_file())
+        .map(|dir| dir.join("Data"))
 }
 
 /// 标准模式数据根：dev/release 分流（隔离；指针文件互不可见）+ 自定义位置指针
