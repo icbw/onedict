@@ -395,6 +395,10 @@ fn finish_capture(
         report_failure(app, program_name.as_deref(), format!("show: {e}"), t1, info.t0);
         return;
     }
+    // show 之后必须**无条件**再重升一次 z 序：上面的 set_always_on_top 在标志位
+    // 已是 topmost 时是彻底的 no-op（tao 差量应用），被压住后永不恢复（见
+    // tray::raise_topmost 的现场说明）
+    crate::tray::raise_topmost(window);
     if let Ok(mut st) = SHARED.lock() {
         st.toolbar = Some(PhysRect {
             x: pos.x,

@@ -452,6 +452,10 @@ pub fn launch_capture(app: &AppHandle) {
         }
     }
     let _ = win.show();
+    // 零焦点唤起下没有任何激活路径会顺带升 z 序，必须显式重升——
+    // 否则覆盖层会被同屏最大化窗口整块盖住（tao 的 set_always_on_top 是差量
+    // no-op，见 tray::raise_topmost）
+    crate::tray::raise_topmost(&win);
     // **零焦点唤起**（⑪双层根因实测）：①快捷键必须
     // Released 触发（主键未释放时激活 = WebView2 接管不完整键盘状态而卡死，
     // 见 tray.rs OcrLookup）；②show 后立即抢焦点（force_focus 组合拳 /

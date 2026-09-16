@@ -225,6 +225,42 @@ pub(crate) fn force_focus(window: &tauri::WebviewWindow) {
     let _ = window.set_focus();
 }
 
+/// 无条件把窗口升到 topmost 段顶端（**显示之后**调用；Windows 专用）。
+///
+/// 不能只依赖 `set_always_on_top(true)`：tao 的窗口标志位是**差量应用**
+/// （`WindowState::set_window_flags` → `apply_diff`，空 diff 直接 return），
+/// 标志位已是 topmost 时那次调用是彻底的 no-op，窗口不会被重新升到段顶。而
+/// Windows 会把 topmost 窗口排到「覆盖整个显示器的前台窗口」之下——实测现场：
+/// 浮标窗口 `WS_VISIBLE` 成立、内容也已渲染（PrintWindow 抓得到 pill），却被
+/// 最大化窗口整块盖住，用户侧表现为「任何触发方式都不弹 bar」；补一次外部
+/// SetWindowPos(HWND_TOPMOST) 立即恢复显示。
+///
+/// 本应用里「非焦点窗口」没有别的重升路径（激活会顺带升 z 序，但浮标
+/// focusable:false、OCR 覆盖层刻意零焦点），故这两处显示后必须显式调用。
+#[cfg(target_os = "windows")]
+pub(crate) fn raise_topmost(window: &tauri::WebviewWindow) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+    let Ok(hwnd) = window.hwnd() else { return };
+    // SAFETY: 仅传本进程窗口句柄调整 z 序，不改尺寸/位置、不抢焦点
+    unsafe {
+        let _ = SetWindowPos(
+            HWND(hwnd.0),
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn raise_topmost(_window: &tauri::WebviewWindow) {}
+
 /// 划词开关切换（托盘菜单 / 全局快捷键共用；命令侧走同一 selection::set_enabled）。
 /// 菜单刷新统一在 set_enabled 内做（覆盖命令/托盘/快捷键全路径）。
 pub fn toggle_selection(app: &AppHandle) {
