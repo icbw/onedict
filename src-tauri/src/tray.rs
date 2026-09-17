@@ -266,6 +266,9 @@ pub(crate) fn raise_topmost(_window: &tauri::WebviewWindow) {}
 pub fn toggle_selection(app: &AppHandle) {
     let next = !crate::selection::enabled();
     crate::selection::set_enabled(app, next);
+    // 开关的可视反馈只有托盘菜单勾选态（屏幕上看不到）——实际反馈缺失会让用户
+    // 把「按了没反应」读成功能坏了，切换后在光标旁给一条短暂提示
+    crate::selection::show_toggle_notice(app, next);
 }
 
 /// 全局快捷键注册（setup 调用；组合键读偏好 hotkeys，前两槽缺省回内置默认，

@@ -1,6 +1,6 @@
 [package]
 name = "onedict"
-version = "0.1.18"
+version = "0.2.0"
 description = "划词查词 / 词典 / 生词卡"
 authors = ["Bowen C"]
 edition = "2021"

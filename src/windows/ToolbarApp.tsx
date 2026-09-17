@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { Power } from "lucide-react";
 import {
   aiReady,
   engineUrl,
@@ -21,11 +22,22 @@ import ToolbarPill from "../components/ToolbarPill";
 import type { PrefsPayload } from "../types/prefs";
 import type { SelectionEvent } from "../types/selection";
 
+/** 开关提示条事件（Rust show_toggle_notice 广播） */
+interface NoticeEvent {
+  text: string;
+  /** 自动隐藏时长（与 Rust 定时一致；前端同时用它清本地态） */
+  ttlMs: number;
+}
+
 export default function ToolbarApp() {
   const [event, setEvent] = useState<SelectionEvent | null>(null);
   const [prefs, setPrefs] = useState<PrefsPayload | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  /** 开关提示条文案（非 null = 本窗口正被当作提示条用） */
+  const [notice, setNotice] = useState<string | null>(null);
   const measureRef = useRef<HTMLDivElement | null>(null);
+  const noticeRef = useRef<HTMLDivElement | null>(null);
+  const noticeTimer = useRef<number>(0);
   const copiedTimer = useRef<number>(0);
   /** 偏好就绪状态（事件回调读 ref，避免闭包读到滞后值） */
   const readyRef = useRef(false);
@@ -64,6 +76,10 @@ export default function ToolbarApp() {
 
     const unlisten = listen<SelectionEvent>("selection://text-selected", (e) => {
       setEvent(e.payload);
+      // 真实划词接管本窗口：撤下可能仍挂着的开关提示条（同一轮 setState，
+      // 不会出现「先闪一帧提示条再变浮标」）
+      window.clearTimeout(noticeTimer.current);
+      setNotice(null);
       // 划词 = 天然重试点：偏好仍未就绪时补拉（首载失败/竞态的长尾兜底）
       if (!readyRef.current) loadPrefs();
     });
@@ -75,13 +91,21 @@ export default function ToolbarApp() {
     const unCompact = listen<boolean>("toolbar://compact", (e) => {
       setPrefs((prev) => (prev ? { ...prev, toolbarCompact: e.payload } : prev));
     });
+    // 划词开关提示条（Rust 定时隐藏窗口；前端同步清态，避免下次复用时残留）
+    const unNotice = listen<NoticeEvent>("selection://notice", (e) => {
+      setNotice(e.payload.text);
+      window.clearTimeout(noticeTimer.current);
+      noticeTimer.current = window.setTimeout(() => setNotice(null), e.payload.ttlMs);
+    });
     return () => {
       void unlisten.then((f) => f());
       void unPrefs.then((f) => f(), () => {});
       void unAi.then((f) => f(), () => {});
       void unCompact.then((f) => f(), () => {});
+      void unNotice.then((f) => f(), () => {});
       window.clearTimeout(copiedTimer.current);
       window.clearTimeout(retryTimer.current);
+      window.clearTimeout(noticeTimer.current);
     };
   }, [loadPrefs]);
 
@@ -102,6 +126,29 @@ export default function ToolbarApp() {
       height: Math.ceil(el.offsetHeight + 7),
     }).catch(() => {});
   }, [event, prefs, copiedId]);
+
+  // 提示条尺寸（独立通道上报：写的是提示条量尺，不动划词浮标的首帧尺寸记忆）
+  useLayoutEffect(() => {
+    const el = noticeRef.current;
+    if (!el) return;
+    void invoke("selection_notice_size", {
+      width: Math.ceil(el.offsetWidth + 6),
+      height: Math.ceil(el.offsetHeight + 7),
+    }).catch(() => {});
+  }, [notice]);
+
+  // 提示条优先于动作栏：它是本窗口当前的唯一内容（真实划词已在事件回调里撤下它）
+  if (notice) {
+    return (
+      <div
+        ref={noticeRef}
+        className="m-[2px_3px_5px_3px] inline-flex h-9 w-max select-none items-center gap-2 whitespace-nowrap rounded-[10px] bg-card px-3 text-card-foreground shadow-[0_2px_3px_rgb(50_50_50_/_0.1)]"
+      >
+        <Power className="size-4 text-primary" />
+        <span className="text-sm">{notice}</span>
+      </div>
+    );
+  }
 
   // 偏好未就绪时不渲染：旧实现按内置默认集兜底，呈现的是「假设的偏好」而非用户配置
   // （动作数与设置页不一致的直接来源）。未就绪窗口极短，由 loadPrefs

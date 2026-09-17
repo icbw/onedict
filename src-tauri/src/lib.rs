@@ -193,6 +193,7 @@ pub fn run() {
             selection::selection_hide_panel,
             selection::selection_hide_toolbar,
             selection::selection_set_toolbar_size,
+            selection::selection_notice_size,
             sys::open_external,
             sys::open_logs_dir,
             sys::app_restart,

@@ -68,6 +68,7 @@ import {
   DEFAULT_HOTKEY_TOGGLE,
   formatHotkey,
   isModifierCode,
+  typingRiskWarning,
 } from "../lib/hotkeys";
 import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import { cn } from "../lib/utils";
@@ -786,6 +787,13 @@ function SelectionSection({ prefsTick = 0 }: { prefsTick?: number }) {
                   <option value="shortcut">快捷键查词</option>
                 </select>
               </SettingRow>
+              {selectionTrigger !== "selected" && (
+                <p className="text-muted-foreground text-xs">
+                  {selectionTrigger === "ctrlkey"
+                    ? "按住 Ctrl ≥0.35 秒捕获当前选区弹浮标；拖选/双击不再触发。"
+                    : "只有「划词查词」快捷键会弹浮标；拖选/双击不再触发。"}
+                </p>
+              )}
               {selectionTrigger === "shortcut" && !hotkeyBound && (
                 <p className="text-amber-600 text-xs">
                   尚未绑定「划词查词」快捷键——请到「快捷键」子页录制后生效。
@@ -2047,39 +2055,44 @@ function HotkeyRow({
   onReset: () => void;
 }) {
   const isDefault = value === defaultToken;
+  // 会向当前应用输入字符的组合（无 Ctrl/Alt + 可打印主键）：告警但不拦——用户可能就要这个键
+  const warning = typingRiskWarning(value);
   return (
-    <SettingRow>
-      <div className="min-w-0 flex-1">
-        <SettingRowTitle>{label}</SettingRowTitle>
-        <SettingDescription>{description}</SettingDescription>
-      </div>
-      <button
-        type="button"
-        onClick={onRecord}
-        aria-label={`设置${label}快捷键`}
-        className={cn(
-          "flex h-7 min-w-[130px] cursor-pointer items-center justify-center gap-1.5 rounded-md border px-2 text-xs transition-colors",
-          recording
-            ? "border-primary bg-primary/10 text-primary"
-            : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground",
-        )}
-      >
-        <Keyboard className="size-3.5" />
-        {recording ? "按下新组合键…（Esc 取消）" : value ? formatHotkey(value) : "未设置"}
-      </button>
-      <Tooltip content="恢复默认" placement="top">
-        <Button
+    <div>
+      <SettingRow>
+        <div className="min-w-0 flex-1">
+          <SettingRowTitle>{label}</SettingRowTitle>
+          <SettingDescription>{description}</SettingDescription>
+        </div>
+        <button
           type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label={`恢复${label}默认快捷键`}
-          disabled={isDefault}
-          onClick={onReset}
+          onClick={onRecord}
+          aria-label={`设置${label}快捷键`}
+          className={cn(
+            "flex h-7 min-w-[130px] cursor-pointer items-center justify-center gap-1.5 rounded-md border px-2 text-xs transition-colors",
+            recording
+              ? "border-primary bg-primary/10 text-primary"
+              : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-foreground",
+          )}
         >
-          <RotateCcw className="size-3.5" />
-        </Button>
-      </Tooltip>
-    </SettingRow>
+          <Keyboard className="size-3.5" />
+          {recording ? "按下新组合键…（Esc 取消）" : value ? formatHotkey(value) : "未设置"}
+        </button>
+        <Tooltip content="恢复默认" placement="top">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label={`恢复${label}默认快捷键`}
+            disabled={isDefault}
+            onClick={onReset}
+          >
+            <RotateCcw className="size-3.5" />
+          </Button>
+        </Tooltip>
+      </SettingRow>
+      {warning && <p className="mt-1 text-amber-600 text-xs">{warning}</p>}
+    </div>
   );
 }
 

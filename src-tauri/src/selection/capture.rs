@@ -110,8 +110,13 @@ fn worker(app: AppHandle, rx: Receiver<WorkerMsg>) {
 }
 
 fn hide_toolbar(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window("selection-toolbar") {
-        let _ = win.hide();
+    // 提示条显示期间不抢着关窗：关闭划词时会补发一条 Disable，若在提示条之后
+    // 到达会把「划词已关闭」刚亮出的提示立刻抹掉（提示条自己到点隐藏）
+    let notice_showing = SHARED.lock().map(|st| st.notice.is_some()).unwrap_or(false);
+    if !notice_showing {
+        if let Some(win) = app.get_webview_window("selection-toolbar") {
+            let _ = win.hide();
+        }
     }
     if let Ok(mut st) = SHARED.lock() {
         st.toolbar_visible = false;
@@ -408,6 +413,7 @@ fn finish_capture(
         });
         st.toolbar_visible = true;
         st.last_text = text.clone(); // 动作面板取词来源
+        st.notice = None; // 真实划词顶掉可能还在显示的开关提示条（定时隐藏随之失效）
     }
 
     let t5 = Instant::now();

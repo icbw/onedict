@@ -93,6 +93,46 @@ export function comboFromEvent(e: KeyboardEvent): string | null {
   return parts.join("+");
 }
 
+/** 可打印字符主键（按下即向目标应用输入字符）：字母 / 数字 / 标点 / 空格 */
+const PRINTABLE_TOKENS = new Set<string>(["space"]);
+for (const t of [
+  "backquote",
+  "backslash",
+  "bracketleft",
+  "bracketright",
+  "comma",
+  "equal",
+  "minus",
+  "period",
+  "quote",
+  "semicolon",
+  "slash",
+]) {
+  PRINTABLE_TOKENS.add(t);
+}
+for (let i = 0; i < 26; i++) PRINTABLE_TOKENS.add(String.fromCharCode(97 + i));
+for (let i = 0; i < 10; i++) PRINTABLE_TOKENS.add(String(i));
+
+/** 组合键是否会把字符打进当前应用：无 Ctrl/Alt 且主键可打印。
+ *  全局快捷键之外按键照常送达前台窗口——Shift+W 这类组合在可编辑处会插入
+ *  字符并覆盖选区（实测：快捷键页录制 Shift+W 后被覆盖的正是待查词文本）。 */
+export function typingRisk(token: string): boolean {
+  const parts = token.split("+").filter(Boolean);
+  const main = parts[parts.length - 1] ?? "";
+  // Ctrl/Alt 组合不进字符；Win 组合由系统接管（Win+R 等不落字符、且多半已被占用）
+  const guarded = parts
+    .slice(0, -1)
+    .some((m) => m === "ctrl" || m === "alt" || m === "super");
+  if (guarded) return false;
+  return PRINTABLE_TOKENS.has(main);
+}
+
+/** 录制/展示时的告警文案；null = 无风险 */
+export function typingRiskWarning(token: string): string | null {
+  if (!token || !typingRisk(token)) return null;
+  return `${formatHotkey(token)} 会向当前应用输入字符（可编辑处会覆盖选区），建议改用含 Ctrl 或 Alt 的组合`;
+}
+
 /** 组合键 token → 展示名（"ctrl+alt+d" → "Ctrl+Alt+D"；"num5" → "Num5"） */
 export function formatHotkey(token: string): string {
   return token

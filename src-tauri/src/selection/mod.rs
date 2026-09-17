@@ -14,7 +14,7 @@ pub mod layout;
 pub mod perf;
 pub mod uia;
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -114,6 +114,9 @@ pub struct SharedState {
     /// 动作隐藏后的短暂抑制窗（动作点击的 mouse up 可能晚于 hide
     /// 到达捕获链 → 浮标「关闭后又出现」；仅动作隐藏路径记录，700ms 内不重弹）
     pub suppress_until: Option<std::time::Instant>,
+    /// 正在显示的开关提示条 id（None = 无；真实划词/主动隐藏时清空，
+    /// 定时隐藏只关自己的那条，不会误关随后的划词浮标）
+    pub notice: Option<u64>,
 }
 
 pub static SHARED: Mutex<SharedState> = Mutex::new(SharedState {
@@ -122,6 +125,7 @@ pub static SHARED: Mutex<SharedState> = Mutex::new(SharedState {
     last_text: String::new(),
     panel_pinned: false,
     suppress_until: None,
+    notice: None,
 });
 
 static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -217,6 +221,124 @@ pub fn set_enabled(app: &AppHandle, enabled: bool) {
 #[tauri::command]
 pub fn selection_set_enabled(app: AppHandle, enabled: bool) {
     set_enabled(&app, enabled);
+}
+
+// ── 划词开关提示条（复用浮标窗口做短暂反馈）──
+
+/// 提示条时长（毫秒）：够读完短句，又不至于盖住紧接的划词
+const NOTICE_TTL_MS: u64 = 1400;
+/// 提示条尺寸量尺记忆（前端上报；与划词浮标量尺分开存，互不污染）
+static NOTICE_SIZE: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+/// 提示条序号：定时隐藏只认自己那条（期间的新提示/真实划词会顶掉它）
+static NOTICE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 提示条逻辑尺寸：优先实测值，首次按文案估算（CJK 约 15px/字 + 内边距）
+fn notice_size(text: &str) -> (f64, f64) {
+    let measured = *NOTICE_SIZE.lock().unwrap_or_else(|e| e.into_inner());
+    measured.unwrap_or_else(|| {
+        let w = 46.0 + 15.0 * text.chars().count() as f64;
+        (w.clamp(110.0, 320.0), 44.0)
+    })
+}
+
+/// 开关切换的可见反馈（托盘菜单 / 全局快捷键共用）。开关本身只有托盘勾选态，
+/// 屏幕上毫无动静时用户读作「按了没反应」——实测反馈缺失导致「划词坏了」误判。
+///
+/// 复用浮标窗口 = 同款外观（透明 + 圆角卡）与零焦点唤起（`focusable: false`）；
+/// **不置 `toolbar_visible`**：提示条不是划词结果——否则 1.4 秒内的真实划词会被
+/// 「浮标已可见」拦掉，键盘钩子也会把随后任意按键当成关闭浮标的信号。
+pub fn show_toggle_notice(app: &AppHandle, enabled: bool) {
+    let text = if enabled { "划词已开启" } else { "划词已关闭" };
+    let Some(window) = app.get_webview_window("selection-toolbar") else {
+        return;
+    };
+    let id = NOTICE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    let cursor = cursor_pos();
+    let (scale, work) = capture::monitor_metrics_at(cursor, &window);
+    let (lw, lh) = notice_size(text);
+    let phys = ((lw * scale).round() as i32, (lh * scale).round() as i32);
+    // 鼠标左下方展开（同划词鼠标路径基线），按所在显示器工作区钳制
+    let anchor = layout::Anchor {
+        point: Point {
+            x: cursor.x,
+            y: cursor.y + layout::BELOW_MOUSE_OFFSET,
+        },
+        orientation: layout::Orientation::BottomLeft,
+    };
+    let pos = layout::place(anchor, phys, work);
+    let _ = window.set_position(Position::Physical(PhysicalPosition::new(pos.x, pos.y)));
+    let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize::new(
+        phys.0 as u32,
+        phys.1 as u32,
+    )));
+    let _ = window.set_always_on_top(true);
+    if let Err(e) = window.show() {
+        tracing::warn!(target: "selection::notice", error = %e, "notice show failed");
+        return;
+    }
+    // show 之后无条件重升 z 序（topmost 标志位未变时 tao 是 no-op）
+    crate::tray::raise_topmost(&window);
+    if let Ok(mut st) = SHARED.lock() {
+        // 接管窗口：若此刻正挂着上一次划词的浮标，其内容已被提示条顶掉——
+        // 不清 toolbar_visible 会让后续划词被「浮标已可见」长期拦掉
+        st.toolbar_visible = false;
+        st.notice = Some(id);
+    }
+    if let Err(e) = app.emit(
+        "selection://notice",
+        NoticeEvent { text: text.to_string(), ttl_ms: NOTICE_TTL_MS },
+    ) {
+        tracing::warn!(target: "selection::notice", error = %e, "notice emit failed");
+    }
+    tracing::info!(target: "selection::notice", enabled, "selection toggle notice shown");
+
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(NOTICE_TTL_MS));
+        let current = SHARED.lock().map(|st| st.notice).unwrap_or(None);
+        if current != Some(id) {
+            return; // 期间已被新提示或真实划词顶掉
+        }
+        if let Ok(mut st) = SHARED.lock() {
+            st.notice = None;
+        }
+        if let Some(w) = app.get_webview_window("selection-toolbar") {
+            let _ = w.hide();
+        }
+    });
+}
+
+/// 提示条尺寸上报（前端量内容后自校正；只在提示条显示期间生效）
+#[tauri::command]
+pub fn selection_notice_size(app: AppHandle, width: f64, height: f64) {
+    *NOTICE_SIZE.lock().unwrap_or_else(|e| e.into_inner()) = Some((width, height));
+    let showing = SHARED.lock().map(|st| st.notice.is_some()).unwrap_or(false);
+    if !showing {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("selection-toolbar") {
+        let _ = window.set_size(tauri::LogicalSize::new(width, height));
+    }
+}
+
+/// 鼠标物理坐标（提示条锚点）
+fn cursor_pos() -> Point {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut pt = POINT::default();
+    // SAFETY: 无参数光标查询
+    unsafe {
+        let _ = GetCursorPos(&mut pt);
+    }
+    Point { x: pt.x, y: pt.y }
+}
+
+/// 提示条事件 payload（仅浮标窗口监听）
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct NoticeEvent {
+    pub text: String,
+    pub ttl_ms: u64,
 }
 
 #[tauri::command]
