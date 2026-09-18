@@ -53,8 +53,8 @@ export default function MainApp() {
   return (
     <div className="flex h-screen w-full">
       {/* 左侧导航栏：中部功能入口 + 底部设置。
-          顶部品牌章已删（与词典 tab 图标重复）；选中态 = 品牌色方块（原品牌章
-          样式下放） */}
+          顶部品牌章已删（与词典 tab 图标重复）；选中态 = 品牌色描边 + 淡底，
+          与设置页导航的「左条 + 加重文字」同属非填充式选中语言 */}
       <nav className="flex w-[52px] shrink-0 flex-col items-center gap-1 border-r border-border bg-muted/30 py-3">
         <NavBtn
           icon={BookOpenText}
@@ -137,15 +137,15 @@ function NavBtn({
         aria-current={active || undefined}
         onClick={onClick}
         className={cn(
-          "relative flex size-9 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors",
+          "relative flex size-9 cursor-pointer items-center justify-center rounded-lg border text-muted-foreground transition-colors",
           active
-            ? "bg-primary text-white shadow-sm"
-            : "hover:bg-accent/60 hover:text-foreground",
+            ? "border-primary bg-primary/10 text-primary"
+            : "border-transparent hover:bg-accent/60 hover:text-foreground",
         )}
       >
         <Icon className="size-[18px]" />
         {dot && (
-          <span className="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-primary ring-2 ring-muted" />
+          <span className="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-primary ring-2 ring-background" />
         )}
       </button>
     </Tooltip>
