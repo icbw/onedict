@@ -1,5 +1,7 @@
 use crate::error::Error;
 
+use super::StyleSheetEntry;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MdictVersion {
     V2,
@@ -19,6 +21,8 @@ pub struct MdictHeader {
     pub keyword_sect_start: usize,
     // UUID for v3 key derivation (raw bytes of the UUID string)
     pub uuid: Option<Vec<u8>>,
+    /// onedict 本地改造：紧凑格式（Compact="Yes"）样式还原表；空 = 无表。
+    pub style_sheet: Vec<StyleSheetEntry>,
 }
 
 pub fn parse_header(data: &[u8]) -> crate::Result<MdictHeader> {
@@ -49,6 +53,7 @@ pub fn parse_header(data: &[u8]) -> crate::Result<MdictHeader> {
     let mut encrypted = 0u8;
     let mut key_case_sensitive = false;
     let mut uuid: Option<Vec<u8>> = None;
+    let mut style_sheet: Vec<StyleSheetEntry> = Vec::new();
 
     for (key, val) in parse_xml_attrs(&header_str) {
         match key.as_str() {
@@ -74,6 +79,7 @@ pub fn parse_header(data: &[u8]) -> crate::Result<MdictHeader> {
                 key_case_sensitive = val.eq_ignore_ascii_case("yes");
             }
             "UUID" => uuid = Some(val.into_bytes()),
+            "StyleSheet" => style_sheet = parse_style_sheet(&val),
             _ => {}
         }
     }
@@ -94,7 +100,85 @@ pub fn parse_header(data: &[u8]) -> crate::Result<MdictHeader> {
         key_case_sensitive,
         keyword_sect_start,
         uuid,
+        style_sheet,
     })
+}
+
+/// onedict 本地改造：解析 StyleSheet 属性值为样式还原表。
+///
+/// 官方格式（MdxBuilder 文档表述，GoldenDict `mdictparser.cc` 同源实现）：
+/// **每 3 行一组——编号 / 前缀 HTML / 后缀 HTML**，编号 1–255。
+/// 前缀在 `` `N` `` 标记处展开，后缀由后续标记或词条结尾收束；
+/// 后缀留空是合法写法（该标记只插入前缀、不封闭任何东西）。
+///
+/// 两个易错点：
+/// 1. 属性值里的 `&lt;` 等实体必须先反转义，否则展开出的是字面量实体文本；
+/// 2. **空行是合法占位**（`KeepEmptyParts` 语义）——丢弃空行会让编号与内容
+///    整体错位（js-mdict 即因此解析出错误的风味表），此处的 CRLF 归一化
+///    对应 XML 属性值规范化（字面换行归一为 LF）后再按行切分。
+fn parse_style_sheet(raw: &str) -> Vec<StyleSheetEntry> {
+    let unescaped = xml_unescape(raw);
+    let normalized = unescaped.replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<&str> = normalized.split('\n').collect();
+
+    let mut sheet = Vec::new();
+    let mut i = 0;
+    while i + 2 < lines.len() {
+        // 组首非数字视为错位/尾部噪声，跳过整组（保持 3 行步进不漂移）
+        if let Ok(id) = lines[i].trim().parse::<u32>() {
+            sheet.push(StyleSheetEntry {
+                id,
+                prefix: lines[i + 1].to_string(),
+                suffix: lines[i + 2].to_string(),
+            });
+        }
+        i += 3;
+    }
+    sheet
+}
+
+/// XML 属性值反转义：预定义实体（lt/gt/quot/apos/amp）与数字实体（`&#10;` / `&#x0A;`）。
+/// 单次扫描——替换结果不再参与解析（`&amp;lt;` 还原为字面量 `&lt;`）；
+/// 未识别的实体（如裸写的 HTML `&nbsp;`）原样保留，交给下游渲染层。
+fn xml_unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(pos) = rest.find('&') {
+        out.push_str(&rest[..pos]);
+        let tail = &rest[pos..];
+        let entity = tail.find(';').map(|semi| &tail[1..semi]);
+        let decoded = entity.and_then(|e| {
+            if e.len() > 10 {
+                return None; // 超长实体名无合法形式，按字面量处理
+            }
+            match e {
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                "amp" => Some('&'),
+                _ => e.strip_prefix('#').and_then(|num| {
+                    let code = match num.strip_prefix('x').or_else(|| num.strip_prefix('X')) {
+                        Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                        None => num.parse::<u32>().ok(),
+                    };
+                    code.and_then(char::from_u32)
+                }),
+            }
+        });
+        match (decoded, entity) {
+            (Some(c), Some(e)) => {
+                out.push(c);
+                rest = &tail[e.len() + 2..];
+            }
+            _ => {
+                out.push('&');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 pub(crate) fn decode_utf16le(data: &[u8]) -> crate::Result<String> {
@@ -248,5 +332,93 @@ mod tests {
         assert_eq!(attrs.len(), 2);
         assert_eq!(attrs[0].0, "Title");
         assert_eq!(attrs[1].0, "Encoding");
+    }
+
+    // ── xml_unescape ────────────────────────────────────────────
+
+    #[test]
+    fn unescapes_predefined_entities() {
+        assert_eq!(xml_unescape("&lt;font&gt;"), "<font>");
+        assert_eq!(xml_unescape("&quot;a&quot;"), "\"a\"");
+        assert_eq!(xml_unescape("&apos;x&apos;"), "'x'");
+        // 单次扫描：&amp;lt; 还原为字面量 &lt;，不再二次解析
+        assert_eq!(xml_unescape("&amp;lt;"), "&lt;");
+        assert_eq!(xml_unescape("&amp;nbsp;"), "&nbsp;");
+    }
+
+    #[test]
+    fn unescapes_numeric_entities() {
+        assert_eq!(xml_unescape("&#10;"), "\n");
+        assert_eq!(xml_unescape("&#x41;"), "A");
+    }
+
+    #[test]
+    fn keeps_unknown_entities_literal() {
+        // HTML 实体（非 XML 预定义）不处理，原样保留给渲染层
+        assert_eq!(xml_unescape("&nbsp;"), "&nbsp;");
+        assert_eq!(xml_unescape("a & b"), "a & b");
+        assert_eq!(xml_unescape("&notanentity;"), "&notanentity;");
+    }
+
+    // ── parse_style_sheet ───────────────────────────────────────
+
+    #[test]
+    fn style_sheet_three_line_groups() {
+        let raw = "1\r\n&lt;font size=+2&gt;&lt;B&gt;\r\n&lt;/font&gt;&lt;/B&gt;&lt;br&gt;\r\n\
+                   2\r\n&lt;i&gt;\r\n&lt;/i&gt;\r\n";
+        let sheet = parse_style_sheet(raw);
+        assert_eq!(
+            sheet,
+            vec![
+                StyleSheetEntry {
+                    id: 1,
+                    prefix: "<font size=+2><B>".into(),
+                    suffix: "</font></B><br>".into()
+                },
+                StyleSheetEntry { id: 2, prefix: "<i>".into(), suffix: "</i>".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn style_sheet_blank_lines_are_significant() {
+        // 空行占位必须保留：编号 1/2 的 前缀与后缀都是空串，编号 3 起才有内容。
+        // 若丢弃空行，3 会错位到前缀 "3" 之外的槽位（js-mdict 的解析缺陷即此）。
+        let raw = "1\n\n\n2\n\n\n3\n&lt;b&gt;\n\n";
+        let sheet = parse_style_sheet(raw);
+        assert_eq!(sheet.len(), 3);
+        assert_eq!(sheet[0], StyleSheetEntry { id: 1, prefix: String::new(), suffix: String::new() });
+        assert_eq!(sheet[1], StyleSheetEntry { id: 2, prefix: String::new(), suffix: String::new() });
+        assert_eq!(sheet[2], StyleSheetEntry { id: 3, prefix: "<b>".into(), suffix: String::new() });
+    }
+
+    #[test]
+    fn style_sheet_skips_malformed_group_without_drift() {
+        // 组首非数字 → 跳过整组，后续编号仍按 3 行步进对齐
+        let raw = "oops\n&lt;b&gt;\n&lt;/b&gt;\n7\n&lt;i&gt;\n&lt;/i&gt;\n";
+        let sheet = parse_style_sheet(raw);
+        assert_eq!(sheet, vec![StyleSheetEntry { id: 7, prefix: "<i>".into(), suffix: "</i>".into() }]);
+    }
+
+    #[test]
+    fn style_sheet_empty_is_empty_vec() {
+        assert!(parse_style_sheet("").is_empty());
+        assert!(parse_style_sheet("\r\n").is_empty());
+    }
+
+    #[test]
+    fn header_reads_style_sheet_attribute() {
+        // 端到端：header 文本 → 属性解析 → 表
+        let header = "<Dictionary Compact=\"Yes\" StyleSheet=\"1\n&lt;b&gt;\n&lt;/b&gt;\n\"/>";
+        let mut found: Option<Vec<StyleSheetEntry>> = None;
+        for (key, val) in parse_xml_attrs(header) {
+            if key == "StyleSheet" {
+                found = Some(parse_style_sheet(&val));
+            }
+        }
+        assert_eq!(
+            found.unwrap(),
+            vec![StyleSheetEntry { id: 1, prefix: "<b>".into(), suffix: "</b>".into() }]
+        );
     }
 }

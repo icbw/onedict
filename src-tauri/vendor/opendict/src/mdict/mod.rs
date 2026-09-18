@@ -15,6 +15,18 @@ use crate::error::Error;
 use crate::types::{DictEntry, DictInfo};
 use crate::Dictionary;
 
+/// MDict 紧凑格式（`Compact="Yes"`）的样式还原项（onedict 本地改造）：
+/// 词条文本中的 `` `id` `` 占位符按此表还原——prefix 在标记处展开，
+/// suffix 由「下一个标记」或词条结尾收束。上游 README 明确标注
+/// "StyleSheet / Compact mode | Not supported"，此处只补齐 header 读取与暴露，
+/// 展开策略由调用方决定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StyleSheetEntry {
+    pub id: u32,
+    pub prefix: String,
+    pub suffix: String,
+}
+
 #[derive(Debug)]
 pub struct MdictDictionary {
     info_data: DictInfo,
@@ -83,6 +95,12 @@ impl MdictDictionary {
             encoding,
             sorted_keys,
         })
+    }
+
+    /// onedict 本地改造：MDict 紧凑格式样式还原表（header StyleSheet 字段解析结果）。
+    /// 空表 = 词典未使用 `` `N` `` 占位（表为空或未启用紧凑格式），调用方无需替换。
+    pub fn style_sheet(&self) -> &[StyleSheetEntry] {
+        &self.mdx.header.style_sheet
     }
 
     /// Look up a resource (CSS, image, font, etc.) from .mdd files.

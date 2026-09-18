@@ -11,11 +11,11 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::SystemTime;
 
 use base64::Engine as _;
-use opendict::mdict::MdictDictionary;
+use opendict::mdict::{MdictDictionary, StyleSheetEntry};
 use opendict::Dictionary;
 use regex::Regex;
 use serde::Serialize;
@@ -439,6 +439,47 @@ fn normalize_query(word: &str) -> String {
     word.trim().split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// MDict 紧凑格式标记还原：把词条文本中的 `` `N` `` 占位符展开为 StyleSheet
+/// 定义的 HTML（「文字版」词典——Compact="Yes" 且带 StyleSheet 表——的唯一
+/// 样式来源，表为空时词典正文即最终 HTML，此函数直接原样返回）。
+///
+/// 展开语义对齐 GoldenDict `MdictParser::substituteStylesheet`（官方客户端闭源，
+/// 该实现是社区验证过的还原行为）：**每个标记 = 关闭上一个样式 + 开启新样式**，
+/// 只挂起一层待闭合后缀（style_sheet 的后缀留空即"只插入前缀、不闭合"，
+/// 文字版 hydcd 全是这种形态）。表外编号整条丢弃——官方客户端成品里不残留
+/// 编号数字，保留反而会把 `` `23` `` 之类的噪声渲染给用户；词条结尾补上
+/// 未闭合的收尾标签，避免标签悬空污染后续排版。
+fn substitute_stylesheet(text: &str, sheet: &[StyleSheetEntry]) -> String {
+    if sheet.is_empty() || !text.contains('`') {
+        return text.to_string();
+    }
+    static MARKER: OnceLock<Regex> = OnceLock::new();
+    let marker = MARKER.get_or_init(|| Regex::new(r"`(\d+)`").expect("标记正则"));
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut pending_end = "";
+    let mut last = 0usize;
+    for cap in marker.captures_iter(text) {
+        let whole = cap.get(0).expect("整体匹配");
+        out.push_str(&text[last..whole.start()]);
+        last = whole.end();
+        let entry = cap[1]
+            .parse::<u32>()
+            .ok()
+            .and_then(|id| sheet.iter().find(|e| e.id == id));
+        out.push_str(pending_end);
+        pending_end = match entry {
+            Some(e) => {
+                out.push_str(&e.prefix);
+                &e.suffix
+            }
+            None => "",
+        };
+    }
+    out.push_str(&text[last..]);
+    out.push_str(pending_end);
+    out
+}
+
 /// 查词（含 @@@LINK 重定向 + 资源内联；禁用词典拒绝）
 #[tauri::command]
 pub fn dictionary_lookup(
@@ -455,6 +496,11 @@ pub fn dictionary_lookup(
         let mut current = word.clone();
         let mut redirected_to: Option<String> = None;
         let mut html: Option<String> = None;
+        // 紧凑格式（StyleSheet）还原 + 资源内联：先展开 `` `N` `` 标记，再内联
+        // src/href 相对资源——样式前缀本身也可能带资源引用，顺序不可反
+        let sheet = d.style_sheet();
+        let render =
+            |raw: &str| inline_with_engine(&substitute_stylesheet(raw, sheet), d, &dict_dir);
         // @@@LINK 链深度限制（防环；pickdict resolveEntry 同款语义）
         for _ in 0..3 {
             let raw = match d.lookup(&current) {
@@ -479,14 +525,14 @@ pub fn dictionary_lookup(
                     .trim();
                 if target.is_empty() || target == current {
                     // 空目标 / 自指：返回原条目（pickdict #20 行为）
-                    html = Some(inline_with_engine(&text, d, &dict_dir));
+                    html = Some(render(&text));
                     break;
                 }
                 redirected_to = Some(target.to_string());
                 current = target.to_string();
                 continue;
             }
-            html = Some(inline_with_engine(&text, d, &dict_dir));
+            html = Some(render(&text));
             break;
         }
         Ok(LookupResult { word, html, redirected_to })
@@ -637,6 +683,97 @@ fn inline_with_engine(html: &str, dict: &MdictDictionary, dict_dir: &Path) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 样式表测试夹具：`(编号, 前缀, 后缀)` 列表 → StyleSheetEntry
+    fn sheet_of(pairs: &[(u32, &str, &str)]) -> Vec<StyleSheetEntry> {
+        pairs
+            .iter()
+            .map(|(id, prefix, suffix)| StyleSheetEntry {
+                id: *id,
+                prefix: prefix.to_string(),
+                suffix: suffix.to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stylesheet_switches_style_by_closing_previous() {
+        // 每个标记 = 关旧 + 开新（GoldenDict 语义）：`2` 处先补 1 的后缀
+        let sheet = sheet_of(&[(1, "<big>", "</big>"), (2, "<i>", "</i>")]);
+        assert_eq!(
+            substitute_stylesheet("`1`A`2`B", &sheet),
+            "<big>A</big><i>B</i>"
+        );
+    }
+
+    #[test]
+    fn stylesheet_same_id_toggles_off_then_on() {
+        let sheet = sheet_of(&[(1, "<big>", "</big>")]);
+        assert_eq!(
+            substitute_stylesheet("`1`A`1`B", &sheet),
+            "<big>A</big><big>B</big>"
+        );
+    }
+
+    #[test]
+    fn stylesheet_unknown_id_dropped_and_closes_current() {
+        let sheet = sheet_of(&[(1, "<big>", "</big>")]);
+        assert_eq!(substitute_stylesheet("`1`A`99`B", &sheet), "<big>A</big>B");
+    }
+
+    #[test]
+    fn stylesheet_insert_only_prefix_when_suffix_empty() {
+        // 文字版（hydcd）形态：后缀全空 = 纯插入，无自动闭合
+        let sheet = sheet_of(&[
+            (20, "<h>", ""),
+            (21, "</h><br>", ""),
+            (9, "&nbsp;", ""),
+            (12, "", ""),
+        ]);
+        assert_eq!(
+            substitute_stylesheet("`20`木`21``9``12`", &sheet),
+            "<h>木</h><br>&nbsp;"
+        );
+    }
+
+    #[test]
+    fn stylesheet_closes_dangling_suffix_at_end() {
+        let sheet = sheet_of(&[(1, "<big>", "</big>")]);
+        assert_eq!(substitute_stylesheet("`1`A", &sheet), "<big>A</big>");
+    }
+
+    #[test]
+    fn stylesheet_noop_without_sheet_or_marker() {
+        let sheet = sheet_of(&[(1, "<big>", "</big>")]);
+        assert_eq!(substitute_stylesheet("`1`A", &[]), "`1`A");
+        assert_eq!(substitute_stylesheet("纯文本", &sheet), "纯文本");
+        // 反引号但非数字标记（正文中的行内代码）不动
+        assert_eq!(substitute_stylesheet("`x`", &sheet), "`x`");
+    }
+
+    #[test]
+    #[ignore = "需要本地黄金语料 test/dicts（gitignore，不入库）"]
+    fn text_dicts_stylesheet_expands_clean() {
+        // hydcd（漢語大詞典文字版，纯插入式表）与 hydzd（汉语大词典简体精排，
+        // 开合式表）：展开后不残留任何 `N` 占位符，且词头样式片段出现
+        let expectations = [
+            ("hydcd", "<font size=+1 color=maroon><b>木</b></font>"),
+            ("hydzd", "<font size=+2><B>木"),
+        ];
+        for (dict, head_html) in expectations {
+            let dir = PathBuf::from("../test/dicts").join(dict);
+            if !dir.is_dir() {
+                println!("跳过 {dict}（语料缺失）");
+                continue;
+            }
+            let d = MdictDictionary::open(dir.as_path()).unwrap();
+            assert!(!d.style_sheet().is_empty(), "{dict} 应有 StyleSheet 表");
+            let raw = String::from_utf8_lossy(&d.lookup("木").unwrap().unwrap()[0].data).into_owned();
+            let html = substitute_stylesheet(&raw, d.style_sheet());
+            assert!(!html.contains('`'), "{dict} 展开后仍残留标记");
+            assert!(html.contains(head_html), "{dict} 词头样式缺失: {}", &html[..html.len().min(300)]);
+        }
+    }
 
     #[test]
     #[ignore = "需要本地黄金语料 test/dicts（gitignore，不入库）"]

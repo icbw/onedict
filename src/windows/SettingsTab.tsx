@@ -191,12 +191,15 @@ export default function SettingsTab({ active = true }: { active?: boolean }) {
               type="button"
               onClick={() => setSection(s.value)}
               className={cn(
-                "w-full cursor-pointer rounded-md px-3 py-1.5 text-left text-sm transition-colors",
+                "relative w-full cursor-pointer rounded-md px-3 py-1.5 text-left text-sm transition-colors",
                 section === s.value
-                  ? "bg-accent font-medium text-foreground"
+                  ? "font-medium text-foreground"
                   : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
               )}
             >
+              {section === s.value && (
+                <span className="absolute top-1/2 left-0 h-4 w-0.5 -translate-y-1/2 rounded-full bg-primary" />
+              )}
               {s.label}
               {s.value === "about" && updateAvailable && !aboutSeen && (
                 <span className="ml-1.5 inline-block size-1.5 rounded-full bg-primary align-middle" />

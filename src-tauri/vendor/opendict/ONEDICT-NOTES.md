@@ -18,7 +18,8 @@
 |---|---|
 | `src/mdict/idxcache.rs` | **新增**：索引磁盘缓存序列化（自写小端二进制 `ODIDX01`，temp+rename 原子写，结构校验失败回退解析） |
 | `src/mdict/file.rs` | `MdictFile::open_with_cache`（缓存命中毫秒级装配 / miss 解析后回写）、`from_cached`、`cached_index`；header 空 Encoding 兜底抽为 `normalized_header` 共用 |
-| `src/mdict/mod.rs` | `MdictDictionary::open_with_cache(dir, cache_dir)`（`open` 保持原签名转发）；`load_mdd_files` 透传缓存；`cache_file_for` 指纹文件名（`源文件名.len.mtime_secs.idxcache`） |
+| `src/mdict/mod.rs` | `MdictDictionary::open_with_cache(dir, cache_dir)`（`open` 保持原签名转发）；`load_mdd_files` 透传缓存；`cache_file_for` 指纹文件名（`源文件名.len.mtime_secs.idxcache`）；新增 `StyleSheetEntry` 与 `MdictDictionary::style_sheet()`——Compact 词典样式还原表的暴露（只出数据，展开在应用侧） |
+| `src/mdict/header.rs` | 新增 `MdictHeader.style_sheet` 字段与 `parse_style_sheet`/`xml_unescape`：StyleSheet 属性解析（XML 反转义 → CRLF 归一 → 每 3 行一组 编号/前缀/后缀，空行保真） |
 
 ## 设计要点
 

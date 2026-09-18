@@ -36,7 +36,7 @@ export const SettingRowTitle = ({ className, ...props }: React.ComponentPropsWit
 
 export const SettingGroup = ({ className, ...props }: React.ComponentPropsWithoutRef<"div">) => (
   <div
-    className={cn("mt-4 rounded-xl border border-border bg-card p-4 first:mt-0", className)}
+    className={cn("mt-4 rounded-lg border border-border bg-card p-4 first:mt-0", className)}
     {...props}
   />
 );
