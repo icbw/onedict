@@ -1,26 +1,28 @@
 /**
  * // from pickdict (MIT), adapted for Tauri —— VocabularyPage.tsx 平移（剥壳适配）。
- * 生词本（复习并入本页，导航删「复习」Tab）：
- * 顶部统计卡（生词 / 待复习 / 今日已复习 + 全局「开始复习」按钮）→
- * 单元制列表：收词箱（固定首位，查词页加词落点，不可删改名）+ 自建单元
- * （inline 新建 / 重命名 / 删除——词条自动回收进收词箱）；单元卡可折叠，
- * 词行点击词头跳词典页查词（onLookup），hover 显示移入单元 / 删除；
- * 页底「学习方案」配置组承载 SM-2 说明（原复习页退化形态）。
- * 复习会话 = ReviewDialog 学习卡弹窗（全部 / 单元两种范围；到期优先——范围内
- * 无到期词自动切「重复练习」提前过全量卡，按钮形态随 dueCount 双色切换）。
+ * 生词本（单元 = 复习单位）：
+ * 顶部统计卡（生词 / 待复习 / 今日已复习 / 已完成单元 + 主按钮「开始今日复习」）→
+ * 今日计划（打分选出的可复习单元，做完自动进入下一轮）→ 学习统计 →
+ * 单元卡列表（收词箱固定首位 + 自建 / 自动聚合单元）。
+ *
+ * 单元卡承载：进度（`第 N 轮`、`12/20 词`、完成时间、毕业徽章）、
+ * 复习 / 抽查 / 不确定词专项入口、收词箱的「智能分组 / 撤销分组」。
+ * 复习会话 = ReviewDialog 学习卡弹窗（队列由 lib/reviewPlan 组装：到期 → 不确定 → 熟词抽查）；
+ * 完成回调用后提交轮次或抽查记录（`vocabulary_unit_round_commit` / `_check_commit`）。
  * 数据经 vocabulary_* 全量拉取；vocabulary-changed 事件驱动刷新。
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
+  AlertTriangle,
   ChevronDown,
-  FolderInput,
   GraduationCap,
   Inbox,
   MoreHorizontal,
   Plus,
-  Trash2,
+  Sparkles,
+  Undo2,
 } from "lucide-react";
 import { Button } from "@onedict/ui/components/button";
 import { Input } from "@onedict/ui/components/input";
@@ -28,7 +30,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@onedict/ui/components/dropdown-menu";
@@ -41,33 +42,61 @@ import {
   SettingsContentColumn,
 } from "../components/SettingsPrimitives";
 import { cn } from "../lib/utils";
-import { INBOX_UNIT_ID, type ReviewDayCount, type VocabularyEntry, type VocabularyUnit } from "../types/vocabulary";
+import { planGroups } from "../lib/grouping";
 import {
+  buildUnitStats,
+  isUnsure,
+  MASTERED_REPETITIONS,
+  pickCheckSample,
+  pickQueue,
+  planUnits,
+  shouldGraduate,
+} from "../lib/reviewPlan";
+import {
+  DEFAULT_UNIT_CAPACITY,
+  INBOX_UNIT_ID,
+  type ReviewDayCount,
+  type RoundRecord,
+  type UnitLogSnapshot,
+  type VocabularyEntry,
+  type VocabularyUnit,
+} from "../types/vocabulary";
+import {
+  dayKeyOf,
   dueCountsByDay,
   stackReviewDays,
   statusBuckets,
   type ReviewLog,
 } from "../lib/stats";
 import { DueBars, ReviewBars, StatusBar } from "../components/charts/ReviewCharts";
+import ReviewDialog, {
+  type ReviewSession,
+  type SessionKind,
+  type SessionSummary,
+} from "./vocabulary/ReviewDialog";
+import WordList from "./vocabulary/WordList";
 
-/** 单元词表默认渲染上限（止血），超出出「显示全部」 */
-const WORDS_WINDOW = 50;
-import ReviewDialog, { type ReviewSession } from "./vocabulary/ReviewDialog";
+/** 抽查抽样词数（单元抽查固定 5 词快验） */
+const CHECK_SAMPLE_SIZE = 5;
+/** 「全部生词」会话单次上限（约 3 个满员单元） */
+const ALL_BATCH_SIZE = 60;
+/** 今日计划默认单元数 */
+const PLAN_UNITS = 3;
 
-/** 单元渲染视图：收词箱 + 自建单元统一形态（词表按加入时间倒序） */
+const EMPTY_UNIT_LOG: UnitLogSnapshot = { rounds: [], checks: [], groups: [] };
+
+/** 单元渲染视图：收词箱 + 自建 / 自动单元统一形态（词表按加入时间倒序） */
 interface UnitView {
   id: string;
   name: string;
   isInbox: boolean;
   entries: VocabularyEntry[];
   dueCount: number;
+  /** 不确定词数（再次错过的词） */
+  unsureCount: number;
+  /** 收词箱无实体单元 */
+  unit: VocabularyUnit | null;
 }
-
-const fmtDate = (ms: number) => {
-  const d = new Date(ms);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-};
 
 const startOfToday = () => {
   const d = new Date();
@@ -80,56 +109,75 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
   const [units, setUnits] = useState<VocabularyUnit[]>([]);
   const [now, setNow] = useState(() => Date.now());
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
-  /** 已展开全量词表的单元（止血 词表默认渲染前 50 条，防千词
-   *  单元上千 DOM 节点；keep-alive 常挂载不释放） */
-  const [expandedUnits, setExpandedUnits] = useState<Set<string>>(() => new Set());
   /** 新建单元 inline 输入态 */
   const [creating, setCreating] = useState(false);
   const [draftName, setDraftName] = useState("");
-  /** 重命名中的单元 id + 草稿（Enter 提交，Esc/blur 取消） */
-  const [renamingId, setRenamingId] = useState<string | null>(null);
-  const [renameDraft, setRenameDraft] = useState("");
+  /** 单元 inline 编辑（重命名 / 设置生词上限） */
+  const [editing, setEditing] = useState<{ id: string; kind: "name" | "capacity" } | null>(null);
+  const [editDraft, setEditDraft] = useState("");
   /** 复习会话（null = 关闭） */
   const [session, setSession] = useState<ReviewSession | null>(null);
-  /** 学习统计：按天聚合的复习日志（vocabulary_review_log，随 refresh 同刷） */
+  /** 学习统计：按天聚合的复习日志（vocabulary_review_log） */
   const [reviewLog, setReviewLog] = useState<ReviewLog>({});
+  /** 单元日志：轮次 / 抽查 / 分组（vocabulary_unit_log） */
+  const [unitLog, setUnitLog] = useState<UnitLogSnapshot>(EMPTY_UNIT_LOG);
 
   const refresh = useCallback(() => {
     setNow(Date.now());
     void invoke<VocabularyEntry[]>("vocabulary_list").then(setEntries);
     void invoke<VocabularyUnit[]>("vocabulary_unit_list").then(setUnits);
     void invoke<Record<string, ReviewDayCount>>("vocabulary_review_log").then(setReviewLog);
+    void invoke<UnitLogSnapshot>("vocabulary_unit_log").then(setUnitLog);
   }, []);
 
   useEffect(() => {
     refresh();
-    // 生词本任何变更（加词/删除/移动/复习评分，任意窗口）→ 刷新
+    // 生词本任何变更（加词/删除/移动/评分/分组/轮次）→ 刷新
     const unlisten = listen("vocabulary-changed", () => refresh());
     return () => {
       void unlisten.then((f) => f(), () => {});
     };
   }, [refresh]);
 
+  /** 单元统计（打分与展示同源） */
+  const unitStats = useMemo(
+    () => buildUnitStats(units, entries ?? [], now),
+    [units, entries, now],
+  );
+
   /** 单元视图派生：收词箱固定首位，自建单元按创建序；词按加入时间倒序 */
   const unitViews = useMemo<UnitView[]>(() => {
     if (entries === null) return [];
     const bucket = (unitId: string): VocabularyEntry[] =>
       entries.filter((e) => e.unitId === unitId).sort((a, b) => b.addedAt - a.addedAt);
+    const unsureOf = (list: VocabularyEntry[]) => list.filter(isUnsure).length;
     const views: UnitView[] = [
-      { id: INBOX_UNIT_ID, name: "收词箱", isInbox: true, entries: [], dueCount: 0 },
+      {
+        id: INBOX_UNIT_ID,
+        name: "收词箱",
+        isInbox: true,
+        entries: [],
+        dueCount: 0,
+        unsureCount: 0,
+        unit: null,
+      },
     ];
-    for (const u of units) {
-      const list = bucket(u.id);
+    for (const unit of units) {
+      const list = bucket(unit.id);
       views.push({
-        id: u.id,
-        name: u.name,
+        id: unit.id,
+        name: unit.name,
         isInbox: false,
         entries: list,
         dueCount: list.filter((e) => e.dueAt <= now).length,
+        unsureCount: unsureOf(list),
+        unit,
       });
     }
-    views[0].entries = bucket(INBOX_UNIT_ID);
-    views[0].dueCount = views[0].entries.filter((e) => e.dueAt <= now).length;
+    const inbox = bucket(INBOX_UNIT_ID);
+    views[0].entries = inbox;
+    views[0].dueCount = inbox.filter((e) => e.dueAt <= now).length;
+    views[0].unsureCount = unsureOf(inbox);
     return views;
   }, [entries, units, now]);
 
@@ -147,6 +195,14 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
     const future = entries?.filter((e) => e.dueAt > now).map((e) => e.dueAt) ?? [];
     return future.length ? Math.min(...future) : null;
   }, [entries, now]);
+  const doneUnits = useMemo(() => units.filter((u) => u.status === "done").length, [units]);
+
+  /** 今日复习计划：打分排序取前 N 个单元 */
+  const plan = useMemo(() => planUnits(unitStats, PLAN_UNITS), [unitStats]);
+  const planFirst = useMemo(
+    () => (plan.length > 0 ? units.find((u) => u.id === plan[0].id) ?? null : null),
+    [plan, units],
+  );
 
   // ── 学习统计：三图数据派生（reviewLog 随 refresh 与 entries 同批刷新）──
   const reviewDays = useMemo(() => stackReviewDays(reviewLog, 30, now), [reviewLog, now]);
@@ -157,25 +213,155 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
   );
   const hasReviewHistory = reviewDays.some((d) => d.total > 0);
 
-  /** 开始复习 / 重复练习：范围 = 全部生词（无参）或单元。
-   *  到期优先——范围内有到期词只出到期（dueAt 升序，最逾期在前）；清空后切换
-   *  「重复练习」提前过全量卡（正常 SM-2 评分：提前复习把间隔按易度因子推远）。
-   *  按钮形态由 dueCount 驱动切换（调用方），本函数只按到期日决定队列。 */
-  const startReview = useCallback(
-    (view?: UnitView) => {
+  /** 启动单元会话：轮次（到期→不确定→熟词抽查）/ 抽查 / 不确定词专项 */
+  const startUnitSession = useCallback(
+    (unit: VocabularyUnit, kind: SessionKind) => {
       if (!entries) return;
-      const inScope = entries.filter((e) => !view || e.unitId === view.id);
-      if (inScope.length === 0) return;
-      const due = inScope.filter((e) => e.dueAt <= Date.now());
-      const repeat = due.length === 0;
-      const queue = [...(repeat ? inScope : due)].sort(
-        (a, b) => a.dueAt - b.dueAt || a.addedAt - b.addedAt,
-      );
-      const label = view ? view.name : "全部生词";
-      setSession({ scopeLabel: repeat ? `${label} · 重复练习` : label, queue });
+      const own = entries.filter((e) => e.unitId === unit.id);
+      const batchSize = unit.capacity > 0 ? unit.capacity : DEFAULT_UNIT_CAPACITY;
+      const ref = { id: unit.id, name: unit.name, round: unit.round };
+      const startedAt = Date.now();
+      if (kind === "check") {
+        const sample = pickCheckSample(own, CHECK_SAMPLE_SIZE);
+        if (sample.length === 0) return;
+        setSession({
+          scopeLabel: `${unit.name} · 抽查`,
+          queue: sample,
+          unit: ref,
+          kind,
+          startedAt,
+        });
+        return;
+      }
+      if (kind === "focus") {
+        const unsure = own.filter(isUnsure).slice(0, batchSize);
+        if (unsure.length === 0) return;
+        setSession({
+          scopeLabel: `${unit.name} · 不确定词`,
+          queue: unsure,
+          unit: ref,
+          kind,
+          startedAt,
+        });
+        return;
+      }
+      const { queue, repeat } = pickQueue(own, { batchSize });
+      if (queue.length === 0) return;
+      setSession({
+        scopeLabel: repeat ? `${unit.name} · 重复练习` : unit.name,
+        queue,
+        unit: ref,
+        kind: "round",
+        startedAt,
+      });
     },
     [entries],
   );
+
+  /** 越过计划：全部生词一次性复习（次级入口） */
+  const startAllSession = useCallback(() => {
+    const all = entries ?? [];
+    const { queue, repeat } = pickQueue(all, { batchSize: ALL_BATCH_SIZE });
+    if (queue.length === 0) return;
+    setSession({
+      scopeLabel: repeat ? "全部生词 · 重复练习" : "全部生词",
+      queue,
+      unit: null,
+      kind: "round",
+      startedAt: Date.now(),
+    });
+  }, [entries]);
+
+  /** 收词箱范围复习（收词箱不是实体单元，不记轮次） */
+  const startInboxSession = useCallback(() => {
+    const inbox = (entries ?? []).filter((e) => e.unitId === INBOX_UNIT_ID);
+    const { queue, repeat } = pickQueue(inbox, { batchSize: DEFAULT_UNIT_CAPACITY });
+    if (queue.length === 0) return;
+    setSession({
+      scopeLabel: repeat ? "收词箱 · 重复练习" : "收词箱",
+      queue,
+      unit: null,
+      kind: "round",
+      startedAt: Date.now(),
+    });
+  }, [entries]);
+
+  /** 会话完成：提交单元轮次（含毕业判定）或抽查记录；全部生词/专项不落记录 */
+  const handleComplete = useCallback(
+    (summary: SessionSummary) => {
+      if (!summary.unitId) return;
+      if (summary.kind === "check") {
+        void invoke("vocabulary_unit_check_commit", {
+          unitId: summary.unitId,
+          sampled: summary.size,
+          missed: summary.missedWords,
+        }).catch(() => {});
+        return;
+      }
+      if (summary.kind !== "round") return;
+      const unit = units.find((u) => u.id === summary.unitId);
+      if (!unit) return;
+      const own = (entries ?? []).filter((e) => e.unitId === unit.id);
+      const mastered = own.filter((e) => e.repetitions >= MASTERED_REPETITIONS).length;
+      const record: RoundRecord = {
+        unitId: unit.id,
+        unitName: unit.name,
+        round: unit.round + 1,
+        startedAt: summary.startedAt,
+        completedAt: summary.completedAt,
+        size: summary.size,
+        again: summary.grades.again,
+        hard: summary.grades.hard,
+        good: summary.grades.good,
+        easy: summary.grades.easy,
+        againPending: summary.againWords.length,
+      };
+      const graduate = shouldGraduate(
+        [...unitLog.rounds, record],
+        unit.id,
+        mastered,
+        own.length,
+      );
+      void invoke("vocabulary_unit_round_commit", {
+        unitId: unit.id,
+        record: {
+          round: record.round,
+          startedAt: record.startedAt,
+          size: record.size,
+          again: record.again,
+          hard: record.hard,
+          good: record.good,
+          easy: record.easy,
+          againPending: record.againPending,
+          status: graduate ? "done" : undefined,
+        },
+      }).catch(() => {});
+    },
+    [units, entries, unitLog],
+  );
+
+  /** 收词箱智能分组：时间批次 + 词形族（落盘走 group_apply，可撤销） */
+  const runGrouping = useCallback(() => {
+    const inbox = (entries ?? []).filter((e) => e.unitId === INBOX_UNIT_ID);
+    if (inbox.length < 2) return;
+    const plans = planGroups(
+      inbox.map((e) => ({ id: e.id, word: e.word, addedAt: e.addedAt })),
+      { capacity: DEFAULT_UNIT_CAPACITY },
+    );
+    if (plans.length === 0) return;
+    void invoke("vocabulary_group_apply", {
+      groups: plans.map((p) => ({
+        name: p.name,
+        seed: p.seed,
+        capacity: DEFAULT_UNIT_CAPACITY,
+        entryIds: p.entryIds,
+      })),
+    }).catch(() => {});
+  }, [entries]);
+
+  const undoGrouping = () => {
+    void invoke("vocabulary_group_undo").catch(() => {});
+  };
 
   const toggleCollapse = (id: string) => {
     setCollapsed((s) => {
@@ -198,12 +384,23 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
       .finally(() => setCreating(false));
   };
 
-  const submitRename = () => {
-    const id = renamingId;
-    const name = renameDraft.trim();
-    setRenamingId(null);
-    if (!id || !name) return;
-    void invoke("vocabulary_unit_rename", { id, name }).catch(() => {});
+  /** 单元 inline 编辑提交：重命名 / 生词上限（0 = 不限） */
+  const submitEdit = () => {
+    const current = editing;
+    setEditing(null);
+    if (!current) return;
+    const draft = editDraft.trim();
+    if (current.kind === "name") {
+      if (!draft) return;
+      void invoke("vocabulary_unit_rename", { id: current.id, name: draft }).catch(() => {});
+      return;
+    }
+    const capacity = Number.parseInt(draft, 10);
+    if (!Number.isFinite(capacity) || capacity < 0) return;
+    void invoke("vocabulary_unit_update", {
+      id: current.id,
+      patch: { capacity },
+    }).catch(() => {});
   };
 
   const removeUnit = (id: string) => {
@@ -220,20 +417,26 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
 
   return (
     <SettingsContentColumn className="h-full">
-      {/* 顶部统计卡：三数字 + 全局开始复习 */}
+      {/* 顶部统计卡：四数字 + 今日复习主入口 */}
       <SettingGroup>
         <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
-          <div className="flex items-center gap-6">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
             {[
-              { label: "生词", value: total },
-              { label: "待复习", value: dueCount, accent: dueCount > 0 },
-              { label: "今日已复习", value: todayReviewed },
-            ].map(({ label, value, accent }) => (
+              { label: "生词", value: String(total) },
+              { label: "待复习", value: String(dueCount), accent: dueCount > 0 },
+              { label: "今日已复习", value: String(todayReviewed) },
+              {
+                label: "已完成单元",
+                value: `${doneUnits}/${units.length}`,
+                accent: doneUnits > 0,
+                accentClass: "text-green-600",
+              },
+            ].map(({ label, value, accent, accentClass }) => (
               <div key={label} className="flex items-baseline gap-1.5">
                 <span
                   className={cn(
                     "font-semibold text-2xl tabular-nums",
-                    accent ? "text-orange-600" : "text-foreground",
+                    accent ? (accentClass ?? "text-orange-600") : "text-foreground",
                   )}
                 >
                   {value}
@@ -244,30 +447,91 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
           </div>
           <Button
             type="button"
-            variant={dueCount > 0 ? "default" : "outline"}
+            variant={dueCount > 0 || planFirst !== null ? "default" : "outline"}
             disabled={total === 0}
             title={
-              dueCount > 0
-                ? undefined
-                : "到期前主动练习（评分照常计入调度，间隔会按掌握度拉长）"
+              planFirst !== null
+                ? `按到期排序：${plan.map((s) => s.name).join(" / ")}`
+                : dueCount > 0
+                  ? undefined
+                  : "到期前主动练习（评分照常计入调度，间隔会按掌握度拉长）"
             }
             className={
-              dueCount > 0
+              dueCount > 0 || planFirst !== null
                 ? undefined
                 : "border-sky-600/40 text-sky-700 hover:bg-sky-500/10 hover:text-sky-700 focus-visible:text-sky-700"
             }
-            onClick={() => startReview()}
+            onClick={() => {
+              if (planFirst) startUnitSession(planFirst, "round");
+              else startAllSession();
+            }}
           >
             <GraduationCap className="size-4" />
-            {dueCount > 0 ? `开始复习（${dueCount}）` : "重复练习"}
+            {planFirst !== null
+              ? plan.length > 1
+                ? `开始今日复习（${plan.length} 单元）`
+                : `开始今日复习（${planFirst.name}）`
+              : dueCount > 0
+                ? `开始复习（${dueCount}）`
+                : "重复练习"}
           </Button>
         </div>
         <SettingDescription>
           {dueCount === 0 && nextDueAt !== null
-            ? `今日到期已清空，下一批 ${fmtDate(nextDueAt)}。`
-            : "查词页将词头加入生词本（收词箱），学习卡中 Space 翻面、1–4 评分。"}
+            ? `今日到期已清空，下一批 ${dayKeyOf(nextDueAt)}。`
+            : "单元为复习单位：一次复习一个单元，完成后进入下一轮；已掌握单元转入抽查维持。"}
         </SettingDescription>
       </SettingGroup>
+
+      {/* 今日复习计划：打分选出的单元（次级入口「全部生词」保留在页底单元列表） */}
+      {plan.length > 0 && (
+        <SettingGroup>
+          <SettingTitle>今日复习计划</SettingTitle>
+          <SettingDescription>
+            按到期密度与逾期程度排序；做完一个再做下一个，单元轮次进度即时更新。
+          </SettingDescription>
+          <div className="mt-3 flex flex-col">
+            {plan.map((stat, i) => {
+              const unit = units.find((u) => u.id === stat.id);
+              if (!unit) return null;
+              return (
+                <div key={stat.id}>
+                  {i > 0 && <div className="border-border-subtle border-t" />}
+                  <div className="flex items-center justify-between gap-3 py-2">
+                    <div className="min-w-0">
+                      <div className="truncate font-medium text-sm">{stat.name}</div>
+                      <div className="text-muted-foreground text-xs">
+                        {stat.size} 词 · <span className="text-orange-600">{stat.dueCount} 待复习</span>
+                        {stat.round > 0 && ` · 第 ${stat.round} 轮`}
+                        {stat.unsureCount > 0 && (
+                          <span className="text-orange-600"> · 不确定 {stat.unsureCount}</span>
+                        )}
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="border-orange-600/40 text-orange-600 hover:bg-orange-500/10 hover:text-orange-600"
+                      onClick={() => startUnitSession(unit, "round")}
+                    >
+                      开始
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="mt-3 flex items-center justify-between gap-3">
+            <span className="text-muted-foreground text-xs">
+              计划外：全部生词（{total} 词，单次最多 {ALL_BATCH_SIZE}）
+            </span>
+            <Button type="button" size="sm" variant="ghost" onClick={startAllSession}>
+              全部生词
+            </Button>
+          </div>
+        </SettingGroup>
+      )}
 
       {/* 学习统计：复习量按天记录（自开启统计起积累）+ 快照派生两图 */}
       <SettingGroup>
@@ -320,6 +584,11 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
       )}
       {unitViews.map((view) => {
         const isCollapsed = collapsed.has(view.id);
+        const unit = view.unit;
+        const capacity = unit?.capacity ?? 0;
+        const overCapacity = capacity > 0 && view.entries.length > capacity;
+        const editingName = editing?.id === view.id && editing.kind === "name";
+        const editingCapacity = editing?.id === view.id && editing.kind === "capacity";
         return (
           <SettingGroup key={view.id} className="p-0">
             {/* 头部：名称区（点击折叠）+ 操作区（互不嵌套 button） */}
@@ -337,16 +606,16 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
                     {view.name.slice(0, 1).toUpperCase()}
                   </span>
                 )}
-                {renamingId === view.id ? (
+                {editingName ? (
                   <Input
                     autoFocus
-                    value={renameDraft}
-                    onChange={(e) => setRenameDraft(e.target.value)}
+                    value={editDraft}
+                    onChange={(e) => setEditDraft(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter") submitRename();
-                      else if (e.key === "Escape") setRenamingId(null);
+                      if (e.key === "Enter") submitEdit();
+                      else if (e.key === "Escape") setEditing(null);
                     }}
-                    onBlur={submitRename}
+                    onBlur={submitEdit}
                     onClick={(e) => e.stopPropagation()}
                     className="h-7 text-sm"
                     spellCheck={false}
@@ -355,11 +624,27 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
                   <>
                     <span className="truncate font-semibold text-[15px]">{view.name}</span>
                     <span className="shrink-0 text-muted-foreground text-xs">
-                      {view.entries.length} 词
+                      {capacity > 0
+                        ? `${view.entries.length}/${capacity} 词`
+                        : `${view.entries.length} 词`}
                       {view.dueCount > 0 && (
                         <span className="text-orange-600"> · {view.dueCount} 待复习</span>
                       )}
+                      {unit && unit.round > 0 && ` · 第 ${unit.round} 轮`}
                     </span>
+                    {unit?.status === "done" && (
+                      <span className="shrink-0 rounded-full bg-green-600/10 px-2 py-0.5 font-medium text-[11px] text-green-700">
+                        已掌握
+                      </span>
+                    )}
+                    {overCapacity && (
+                      <span
+                        className="shrink-0 text-orange-600 text-xs"
+                        title={`超过单元上限 ${capacity} 词——建议移出或调高上限`}
+                      >
+                        超限
+                      </span>
+                    )}
                   </>
                 )}
                 <ChevronDown
@@ -370,27 +655,70 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
                 />
               </button>
               <div className="flex shrink-0 items-center gap-1.5">
+                {view.unsureCount > 0 && unit && (
+                  <button
+                    type="button"
+                    className="flex cursor-pointer items-center gap-1 rounded-md bg-orange-500/10 px-2 py-1 font-medium text-[11px] text-orange-700 transition-colors hover:bg-orange-500/20"
+                    title="专项复习本单元的不确定词（评分照常计入 SM-2）"
+                    onClick={() => startUnitSession(unit, "focus")}
+                  >
+                    <AlertTriangle className="size-3" />
+                    不确定 {view.unsureCount}
+                  </button>
+                )}
                 {view.entries.length > 0 && (
                   <Button
                     type="button"
                     size="sm"
                     variant="outline"
-                    title={
-                      view.dueCount > 0
-                        ? undefined
-                        : "到期前主动练习（评分照常计入调度）"
-                    }
+                    title={view.dueCount > 0 ? undefined : "到期前主动练习（评分照常计入调度）"}
                     className={
                       view.dueCount > 0
                         ? "border-orange-600/40 text-orange-600 hover:bg-orange-500/10 hover:text-orange-600"
                         : "border-sky-600/40 text-sky-700 hover:bg-sky-500/10 hover:text-sky-700"
                     }
-                    onClick={() => startReview(view)}
+                    onClick={() =>
+                      unit ? startUnitSession(unit, "round") : startInboxSession()
+                    }
                   >
                     {view.dueCount > 0 ? `复习 ${view.dueCount}` : "重复练习"}
                   </Button>
                 )}
-                {!view.isInbox && renamingId !== view.id && (
+                {unit && unit.round > 0 && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    title="随机抽 5 词快验（不记轮次，只记抽查结果）"
+                    onClick={() => startUnitSession(unit, "check")}
+                  >
+                    抽查
+                  </Button>
+                )}
+                {view.isInbox && view.entries.length >= 2 && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    title="按时间批次与词形族自动整理为单元"
+                    onClick={runGrouping}
+                  >
+                    <Sparkles className="size-4" />
+                    智能分组
+                  </Button>
+                )}
+                {view.isInbox && unitLog.groups.length > 0 && (
+                  <button
+                    type="button"
+                    className="flex size-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    aria-label="撤销分组"
+                    title="撤销最近一次智能分组（单元删除、词条回收进收词箱）"
+                    onClick={undoGrouping}
+                  >
+                    <Undo2 className="size-4" />
+                  </button>
+                )}
+                {!view.isInbox && !editingName && !editingCapacity && (
                   <DropdownMenu>
                     <DropdownMenuTrigger
                       className="flex size-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none"
@@ -401,11 +729,19 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
                     <DropdownMenuContent align="end">
                       <DropdownMenuItem
                         onClick={() => {
-                          setRenameDraft(view.name);
-                          setRenamingId(view.id);
+                          setEditDraft(view.name);
+                          setEditing({ id: view.id, kind: "name" });
                         }}
                       >
                         重命名
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={() => {
+                          setEditDraft(String(capacity || DEFAULT_UNIT_CAPACITY));
+                          setEditing({ id: view.id, kind: "capacity" });
+                        }}
+                      >
+                        设置生词上限
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
@@ -420,7 +756,28 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
               </div>
             </div>
 
-            {/* 词表（可折叠） */}
+            {/* 上限 inline 编辑 */}
+            {editingCapacity && (
+              <div className="flex items-center gap-2 px-4 pb-3">
+                <span className="shrink-0 text-muted-foreground text-xs">生词上限</span>
+                <Input
+                  autoFocus
+                  value={editDraft}
+                  onChange={(e) => setEditDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") submitEdit();
+                    else if (e.key === "Escape") setEditing(null);
+                  }}
+                  onBlur={submitEdit}
+                  inputMode="numeric"
+                  className="h-7 w-24 text-sm"
+                  spellCheck={false}
+                />
+                <span className="text-muted-foreground text-xs">0 = 不限（当前 {view.entries.length} 词）</span>
+              </div>
+            )}
+
+            {/* 词表（可折叠；词数超阈值走虚拟滚动，见 vocabulary/WordList） */}
             {!isCollapsed && (
               <div className="px-4 pb-3">
                 {view.entries.length === 0 ? (
@@ -428,90 +785,14 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
                     {view.isInbox ? "还没有生词 — 到词典页查询并加入。" : "暂无生词，从词行菜单移入。"}
                   </p>
                 ) : (
-                  <>
-                    {view.entries
-                      .slice(0, expandedUnits.has(view.id) ? undefined : WORDS_WINDOW)
-                      .map((entry, i) => {
-                    const dueNow = entry.dueAt <= now;
-                    return (
-                      <div key={entry.id}>
-                        {i > 0 && <div className="border-border-subtle border-t" />}
-                        <div className="group flex items-center justify-between gap-3 py-2">
-                          <div className="min-w-0">
-                            <button
-                              type="button"
-                              onClick={() => onLookup(entry.word)}
-                              title={`查询 ${entry.word}`}
-                              className="block max-w-full cursor-pointer truncate text-left font-medium text-sm transition-colors hover:text-primary"
-                            >
-                              {entry.word}
-                            </button>
-                            <div className="text-muted-foreground text-xs">
-                              添加于 {fmtDate(entry.addedAt)}
-                              {" · "}
-                              {dueNow ? (
-                                <span className="text-orange-600">待复习</span>
-                              ) : (
-                                `到期 ${fmtDate(entry.dueAt)}`
-                              )}
-                            </div>
-                          </div>
-                          <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-                            <DropdownMenu>
-                              <DropdownMenuTrigger
-                                className="flex size-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none"
-                                aria-label="移入单元"
-                                title="移入单元"
-                              >
-                                <FolderInput className="size-4" />
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end">
-                                <DropdownMenuLabel>移入单元</DropdownMenuLabel>
-                                {entry.unitId !== INBOX_UNIT_ID && (
-                                  <DropdownMenuItem
-                                    onClick={() => moveEntry(entry.id, INBOX_UNIT_ID)}
-                                  >
-                                    收词箱
-                                  </DropdownMenuItem>
-                                )}
-                                {unitViews
-                                  .filter((u) => !u.isInbox && u.id !== entry.unitId)
-                                  .map((u) => (
-                                    <DropdownMenuItem
-                                      key={u.id}
-                                      onClick={() => moveEntry(entry.id, u.id)}
-                                    >
-                                      {u.name}
-                                    </DropdownMenuItem>
-                                  ))}
-                              </DropdownMenuContent>
-                            </DropdownMenu>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon-sm"
-                              aria-label="删除"
-                              title="从生词本删除"
-                              onClick={() => removeEntry(entry.id)}
-                            >
-                              <Trash2 className="size-4" />
-                            </Button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                      })
-                    }
-                    {!expandedUnits.has(view.id) && view.entries.length > WORDS_WINDOW && (
-                      <button
-                        type="button"
-                        onClick={() => setExpandedUnits((prev) => new Set(prev).add(view.id))}
-                        className="mt-2 w-full cursor-pointer rounded-md border border-border-subtle py-1.5 text-muted-foreground text-xs transition-colors hover:bg-accent"
-                      >
-                        显示全部 {view.entries.length} 词
-                      </button>
-                    )}
-                  </>
+                  <WordList
+                    entries={view.entries}
+                    now={now}
+                    moveTargets={unitViews}
+                    onLookup={onLookup}
+                    onMove={moveEntry}
+                    onRemove={removeEntry}
+                  />
                 )}
               </div>
             )}
@@ -564,12 +845,25 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
         </SettingRow>
         <SettingDescription>
           按记忆曲线到期复习，评分四档「重来 / 困难 / 良好 / 简单」——重来次日再学，其余按易度因子
-          拉长间隔；新词加入即到期。删除单元时词条自动回收进收词箱。
+          拉长间隔；新词加入即到期。单元容量默认 {DEFAULT_UNIT_CAPACITY} 词，一次复习上限即单元容量；
+          连续两轮无「重来」且八成词进入长间隔即视为已掌握，转入抽查维持。
         </SettingDescription>
       </SettingGroup>
 
       {/* 学习卡弹窗 */}
-      <ReviewDialog session={session} onClose={() => setSession(null)} />
+      <ReviewDialog
+        session={session}
+        onClose={() => setSession(null)}
+        onComplete={handleComplete}
+        onFocusAgain={
+          session?.unit
+            ? () => {
+                const unit = units.find((u) => u.id === session.unit!.id);
+                if (unit) startUnitSession(unit, "focus");
+              }
+            : undefined
+        }
+      />
     </SettingsContentColumn>
   );
 }

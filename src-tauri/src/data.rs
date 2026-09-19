@@ -28,6 +28,7 @@ const BACKUP_FILES: &[&str] = &[
     "history.json",
     "translate-history.json",
     "review-log.json",
+    "unit-log.json",
 ];
 
 /// 备份容器版本：v1 = 仅文本数据文件；v2 = 追加可选 `cache`（词典索引缓存，
@@ -337,6 +338,8 @@ pub fn data_restore(path: String, app: tauri::AppHandle) -> Result<RestoreStats,
         .reload_from(dir.join("translate-history.json"))?;
     app.state::<crate::reviewlog::ReviewLogStore>()
         .reload_from(dir.join("review-log.json"))?;
+    app.state::<crate::unitlog::UnitLogStore>()
+        .reload_from(dir.join("unit-log.json"))?;
     app.state::<crate::dictionary::Registry>().reset();
 
     // 全量广播：设置页/生词本/历史/词典页监听重拉

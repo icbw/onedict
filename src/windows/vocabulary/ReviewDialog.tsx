@@ -47,11 +47,36 @@ import type { DictMeta, LookupResult } from "../../types/dictionary";
 import type { PrefsPayload } from "../../types/prefs";
 import type { VocabularyEntry } from "../../types/vocabulary";
 
+/** 会话类型：轮次复习（记单元轮次）/ 抽查（记抽查记录）/ 专项（不确定词，仅练习） */
+export type SessionKind = "round" | "check" | "focus";
+
 export interface ReviewSession {
-  /** 复习范围显示名（「全部生词」/ 单元名） */
+  /** 复习范围显示名（「全部生词」/ 单元名 / 「单元名 · 抽查」） */
   scopeLabel: string;
-  /** 初始队列（父组件组装：到期词 dueAt 升序） */
+  /** 初始队列（父组件组装：到期优先 → 不确定补齐 → 熟词抽查） */
   queue: VocabularyEntry[];
+  /** 来源单元（null = 全部生词；轮次 / 抽查记录需要） */
+  unit: { id: string; name: string; round: number } | null;
+  kind: SessionKind;
+  /** 会话开始时间（轮次记录用） */
+  startedAt: number;
+}
+
+/** 会话完成小结（父组件据此提交单元轮次 / 抽查记录） */
+export interface SessionSummary {
+  kind: SessionKind;
+  unitId: string | null;
+  unitName: string | null;
+  /** 本轮入场词数 */
+  size: number;
+  /** 四档评分次数 */
+  grades: Record<ReviewGrade, number>;
+  /** 评过「重来」的词（去重；下一轮优先） */
+  againWords: string[];
+  /** 评过「重来 / 困难」的词（去重；抽查漏词统计） */
+  missedWords: string[];
+  startedAt: number;
+  completedAt: number;
 }
 
 /** 四档评分 → 按钮（同 pickdict ReviewPage 映射；key = 数字快捷键） */
@@ -77,9 +102,15 @@ const KEY_TO_GRADE: Record<string, ReviewGrade> = {
 export default function ReviewDialog({
   session,
   onClose,
+  onComplete,
+  onFocusAgain,
 }: {
   session: ReviewSession | null;
   onClose: () => void;
+  /** 队列清空（完成一轮）时回调一次——记录提交由父组件负责 */
+  onComplete?: (summary: SessionSummary) => void;
+  /** 完成态「再来一轮（不确定词）」——父组件用同单元的不确定词重建会话 */
+  onFocusAgain?: () => void;
 }) {
   const open = session !== null;
   const [queue, setQueue] = useState<VocabularyEntry[]>([]);
@@ -87,6 +118,18 @@ export default function ReviewDialog({
   const [revealed, setRevealed] = useState(false);
   const [html, setHtml] = useState<string | null>(null);
   const [reviewedCount, setReviewedCount] = useState(0);
+  /** 四档评分次数（完成态展示 + 轮次记录同源） */
+  const [gradeCounts, setGradeCounts] = useState<Record<ReviewGrade, number>>({
+    again: 0,
+    hard: 0,
+    good: 0,
+    easy: 0,
+  });
+  /** 评过「重来」/「重来或困难」的词（去重；完成小结用） */
+  const againWordsRef = useRef(new Set<string>());
+  const missedWordsRef = useRef(new Set<string>());
+  /** 完成回调只触发一次（队列清空后 effect 可能重跑） */
+  const completedRef = useRef(false);
   const revealSeq = useRef(0);
   const dictsRef = useRef<DictMeta[]>([]);
   /** 背面释义 iframe（event.source 匹配出发帧，sound:// 消息只认它） */
@@ -124,6 +167,10 @@ export default function ReviewDialog({
     setRevealed(false);
     setHtml(null);
     setReviewedCount(0);
+    setGradeCounts({ again: 0, hard: 0, good: 0, easy: 0 });
+    againWordsRef.current = new Set();
+    missedWordsRef.current = new Set();
+    completedRef.current = false;
     revealSeq.current++;
     speakSeq.current++;
     htmlRef.current = null;
@@ -143,6 +190,24 @@ export default function ReviewDialog({
   const current = queue[index];
   const done = index >= queue.length;
   const progress = queue.length === 0 ? 100 : (Math.min(index, queue.length) / queue.length) * 100;
+
+  // 完成回调：队列清空即汇总一次（父组件提交轮次 / 抽查记录；专项练习不落记录）
+  useEffect(() => {
+    if (!open || !done || !session || completedRef.current) return;
+    completedRef.current = true;
+    onComplete?.({
+      kind: session.kind,
+      unitId: session.unit?.id ?? null,
+      unitName: session.unit?.name ?? null,
+      size: session.queue.length,
+      grades: gradeCounts,
+      againWords: [...againWordsRef.current],
+      missedWords: [...missedWordsRef.current],
+      startedAt: session.startedAt,
+      completedAt: Date.now(),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在队列清空瞬间触发一次
+  }, [open, done, session]);
 
   // 播放（父页 Audio：正面按钮与自动发音无用户手势链路；被拦截时提示重试）
   const playBase64 = (mime: string, base64: string) => {
@@ -243,6 +308,9 @@ export default function ReviewDialog({
       next: { ...next, grade: g }, // 学习统计：评分随调度一并提交记录
     });
     setReviewedCount((n) => n + 1);
+    setGradeCounts((counts) => ({ ...counts, [g]: counts[g] + 1 }));
+    if (g === "again") againWordsRef.current.add(card.word);
+    if (g === "again" || g === "hard") missedWordsRef.current.add(card.word);
     if (g === "again") {
       setQueue((q) => [...q, updated]);
       // index 不动 → 自动进入下一张（队首让位）；仅剩该卡时原地重现
@@ -333,13 +401,43 @@ export default function ReviewDialog({
         {done ? (
           <div className="flex flex-col items-center gap-3 py-12">
             <CheckCircle2 className="size-10 text-green-600" />
-            <div className="font-semibold text-lg">本次复习完成</div>
+            <div className="font-semibold text-lg">
+              {session?.kind === "check" ? "抽查完成" : "本次复习完成"}
+            </div>
             <p className="text-muted-foreground text-sm">
-              共复习 {reviewedCount} 张（「重来」的卡片已回队尾重学）
+              {session?.kind === "check"
+                ? `抽查 ${reviewedCount} 词，${missedWordsRef.current.size} 词未通过`
+                : `共复习 ${reviewedCount} 张（「重来」的卡片已回队尾重学）`}
             </p>
-            <Button type="button" onClick={onClose}>
-              完成
-            </Button>
+            {/* 四档分布（与单元轮次记录同源） */}
+            <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
+              {(
+                [
+                  ["again", "重来", "#dc2626"],
+                  ["hard", "困难", "#d97706"],
+                  ["good", "良好", "#16a34a"],
+                  ["easy", "简单", "#2563eb"],
+                ] as const
+              ).map(([key, label, color]) => (
+                <span
+                  key={key}
+                  className="flex items-center gap-1.5 text-muted-foreground text-xs"
+                >
+                  <span className="size-2 rounded-full" style={{ backgroundColor: color }} />
+                  {label} {gradeCounts[key]}
+                </span>
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              {onFocusAgain && session?.kind !== "focus" && missedWordsRef.current.size > 0 && (
+                <Button type="button" variant="outline" onClick={onFocusAgain}>
+                  再来一轮（不确定 {missedWordsRef.current.size} 词）
+                </Button>
+              )}
+              <Button type="button" onClick={onClose}>
+                完成
+              </Button>
+            </div>
           </div>
         ) : (
           current && (

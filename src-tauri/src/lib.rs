@@ -11,6 +11,7 @@ mod reviewlog;
 mod selection;
 mod sys;
 mod tray;
+mod unitlog;
 mod update;
 mod vocabulary;
 mod webdict;
@@ -42,6 +43,7 @@ pub fn run() {
         builder = builder
             .manage(vocabulary::VocabularyStore::open(dir))
             .manage(reviewlog::ReviewLogStore::open(dir))
+            .manage(unitlog::UnitLogStore::open(dir))
             .manage(history::HistoryStore::open(dir))
             .manage(history::translate::TranslateHistoryStore::open(dir));
     }
@@ -135,6 +137,10 @@ pub fn run() {
             if app.try_state::<reviewlog::ReviewLogStore>().is_none() {
                 app.manage(reviewlog::ReviewLogStore::open(&data_dir));
             }
+            // 单元复习日志：轮次 / 抽查 / 分组记录（unit-log.json）
+            if app.try_state::<unitlog::UnitLogStore>().is_none() {
+                app.manage(unitlog::UnitLogStore::open(&data_dir));
+            }
             //  查词历史持久化（app_data_dir()/history.json）
             if app.try_state::<history::HistoryStore>().is_none() {
                 app.manage(history::HistoryStore::open(&data_dir));
@@ -180,7 +186,13 @@ pub fn run() {
             vocabulary::vocabulary_unit_create,
             vocabulary::vocabulary_unit_rename,
             vocabulary::vocabulary_unit_remove,
+            vocabulary::vocabulary_unit_update,
             vocabulary::vocabulary_move,
+            vocabulary::vocabulary_group_apply,
+            vocabulary::vocabulary_group_undo,
+            vocabulary::vocabulary_unit_round_commit,
+            vocabulary::vocabulary_unit_check_commit,
+            vocabulary::vocabulary_unit_log,
             history::history_list,
             history::history_add,
             history::history_clear,

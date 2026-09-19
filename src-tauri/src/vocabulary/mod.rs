@@ -4,6 +4,13 @@
 //!   vocabulary_add     幂等添加：同 normKey 已存在时返回已有条目（created=false）
 //!   vocabulary_remove  删除（id 不存在时静默，无错误）
 //!   vocabulary_review  提交复习调度结果（reviewCount+1 后合并写盘）
+//!   —— 单元与分组（单元 = 复习单位）
+//!   vocabulary_unit_update       更新单元元数据（容量 / 状态 / 锁定 / 显示序）
+//!   vocabulary_group_apply       智能分组落地：一次创建自动单元 + 批量移动词条
+//!   vocabulary_group_undo        撤销最近一次自动分组（删单元、词条回收进收词箱）
+//!   vocabulary_unit_round_commit 提交单元复习轮次（unit-log.json + 单元进度推进）
+//!   vocabulary_unit_check_commit 提交单元抽查记录
+//!   vocabulary_unit_log          单元轮次 / 抽查 / 分组记录（前端自取切片）
 //!
 //! 存储 = app_data_dir()/vocabulary.json 单文件（schema 扁平、字段名与 pickdict 逐字段
 //! 一致，version=1，两作数据文件可互迁；量大再评估 rusqlite）。
@@ -51,15 +58,123 @@ pub struct VocabularyEntry {
     pub last_reviewed_at: Option<i64>,
     pub review_count: i64,
     pub lapses: i64,
+    /// 最近一次评分（不确定词判定 = again/hard 或 lapses 偏高；serde default 兼容旧文件）
+    #[serde(default)]
+    pub last_grade: Option<String>,
 }
 
-/// 学习单元（生词本分组；收词箱为保留 id 不入此列表）
+/// 单元容量默认值（新建 / 自动分组未显式指定时的生词上限）
+pub const DEFAULT_UNIT_CAPACITY: u32 = 20;
+
+/// 单元来源：手工创建 / 自动聚合（自动单元可被重跑替换）
+pub const UNIT_KIND_MANUAL: &str = "manual";
+pub const UNIT_KIND_AUTO: &str = "auto";
+/// 单元状态：进行中 / 已毕业 / 暂停
+pub const UNIT_STATUS_ACTIVE: &str = "active";
+pub const UNIT_STATUS_DONE: &str = "done";
+pub const UNIT_STATUS_PAUSED: &str = "paused";
+
+fn default_unit_kind() -> String {
+    UNIT_KIND_MANUAL.to_string()
+}
+
+fn default_unit_capacity() -> u32 {
+    DEFAULT_UNIT_CAPACITY
+}
+
+fn default_unit_status() -> String {
+    UNIT_STATUS_ACTIVE.to_string()
+}
+
+/// 学习单元（分组 + 复习单位；收词箱为保留 id 不入此列表）。
+/// id/name/createdAt 之外均为后加字段：serde default 保证旧文件零破坏。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VocabularyUnit {
     pub id: String,
     pub name: String,
     pub created_at: i64,
+    /// 来源：manual / auto
+    #[serde(default = "default_unit_kind")]
+    pub kind: String,
+    /// 生词上限（0 = 不限）；自动分组按此拆包
+    #[serde(default = "default_unit_capacity")]
+    pub capacity: u32,
+    /// active / done / paused（毕业判定见前端 reviewPlan）
+    #[serde(default = "default_unit_status")]
+    pub status: String,
+    /// 当前复习轮次（0 = 未开始，每完成一轮 +1）
+    #[serde(default)]
+    pub round: u32,
+    /// 上一轮完成时间
+    #[serde(default)]
+    pub last_completed_at: Option<i64>,
+    /// 聚合规则标识（展示分组依据 / 重算分组）
+    #[serde(default)]
+    pub seed: Option<String>,
+    /// 用户手改过 → 自动重跑不覆盖
+    #[serde(default)]
+    pub locked: bool,
+    /// 显示序（0 = 按创建序）
+    #[serde(default)]
+    pub order: i64,
+}
+
+/// 新建单元的可选参数（缺省 = 手工单元 / 默认容量 / 未锁定）
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnitCreateOpts {
+    pub kind: Option<String>,
+    pub capacity: Option<u32>,
+    pub seed: Option<String>,
+    pub locked: Option<bool>,
+}
+
+/// 单元元数据补丁（仅传入字段生效）
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnitPatch {
+    pub name: Option<String>,
+    pub capacity: Option<u32>,
+    pub status: Option<String>,
+    pub locked: Option<bool>,
+    pub order: Option<i64>,
+}
+
+/// 智能分组的一组：单元名 + 归属词条（由前端聚合算法产出）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupSpec {
+    pub name: String,
+    #[serde(default)]
+    pub seed: Option<String>,
+    #[serde(default)]
+    pub capacity: Option<u32>,
+    pub entry_ids: Vec<String>,
+}
+
+/// 单元复习轮次提交（unit-log 记录 + 单元进度推进；完成时间与单元名由存储侧补全）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoundRecordInput {
+    /// 第几轮（1 起）
+    pub round: u32,
+    #[serde(default)]
+    pub started_at: i64,
+    pub size: u32,
+    #[serde(default)]
+    pub again: u32,
+    #[serde(default)]
+    pub hard: u32,
+    #[serde(default)]
+    pub good: u32,
+    #[serde(default)]
+    pub easy: u32,
+    #[serde(default)]
+    pub again_pending: u32,
+    /// 毕业规则（前端 reviewPlan 判定）给出的新状态；None = 保持
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -193,6 +308,7 @@ impl VocabState {
             last_reviewed_at: None,
             review_count: 0,
             lapses: 0,
+            last_grade: None,
         };
         self.entries.push(entry.clone());
         self.persist();
@@ -211,7 +327,12 @@ impl VocabState {
     }
 
     /// 新建单元（名称 trim 后非空；重名允许——分组语义非唯一键）
-    fn unit_create(&mut self, raw_name: &str, now: i64) -> Result<VocabularyUnit, String> {
+    fn unit_create(
+        &mut self,
+        raw_name: &str,
+        now: i64,
+        opts: &UnitCreateOpts,
+    ) -> Result<VocabularyUnit, String> {
         let name = raw_name.trim();
         if name.is_empty() {
             return Err("empty unit name".into());
@@ -220,6 +341,14 @@ impl VocabState {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
             created_at: now,
+            kind: opts.kind.clone().unwrap_or_else(|| UNIT_KIND_MANUAL.to_string()),
+            capacity: opts.capacity.unwrap_or(DEFAULT_UNIT_CAPACITY),
+            status: UNIT_STATUS_ACTIVE.to_string(),
+            round: 0,
+            last_completed_at: None,
+            seed: opts.seed.clone(),
+            locked: opts.locked.unwrap_or(false),
+            order: self.units.len() as i64,
         };
         self.units.push(unit.clone());
         self.persist();
@@ -262,7 +391,8 @@ impl VocabState {
         Ok(removed)
     }
 
-    /// 移动词条到单元（目标须为收词箱或已存在单元；词条不存在报错）
+    /// 移动词条到单元（目标须为收词箱或已存在单元；词条不存在报错）。
+    /// 手改内容即锁定目标单元——自动分组重跑不覆盖用户的调整。
     fn move_entry(&mut self, entry_id: &str, unit_id: &str) -> Result<(), String> {
         if unit_id != INBOX_UNIT_ID && !self.units.iter().any(|u| u.id == unit_id) {
             return Err(format!("unit not found: {unit_id}"));
@@ -272,11 +402,134 @@ impl VocabState {
             .iter_mut()
             .find(|e| e.id == entry_id)
             .ok_or_else(|| format!("vocabulary entry not found: {entry_id}"))?;
-        if entry.unit_id != unit_id {
+        let changed = entry.unit_id != unit_id;
+        if changed {
             entry.unit_id = unit_id.to_string();
+        }
+        if changed {
+            if let Some(unit) = self.units.iter_mut().find(|u| u.id == unit_id) {
+                unit.locked = true;
+            }
             self.persist();
         }
         Ok(())
+    }
+
+    /// 更新单元元数据（仅传入字段生效；空名报错；收词箱不可改）
+    fn unit_update(&mut self, id: &str, patch: &UnitPatch) -> Result<VocabularyUnit, String> {
+        if id == INBOX_UNIT_ID {
+            return Err("cannot update inbox".into());
+        }
+        if let Some(name) = patch.name.as_deref() {
+            if name.trim().is_empty() {
+                return Err("empty unit name".into());
+            }
+        }
+        let unit = self
+            .units
+            .iter_mut()
+            .find(|u| u.id == id)
+            .ok_or_else(|| format!("unit not found: {id}"))?;
+        if let Some(name) = patch.name.as_deref() {
+            unit.name = name.trim().to_string();
+        }
+        if let Some(capacity) = patch.capacity {
+            unit.capacity = capacity;
+        }
+        if let Some(status) = patch.status.as_deref() {
+            unit.status = status.to_string();
+        }
+        if let Some(order) = patch.order {
+            unit.order = order;
+        }
+        // 手改即锁定（显式传 locked 时以传入值为准，便于解绑）
+        unit.locked = patch.locked.unwrap_or(true);
+        let updated = unit.clone();
+        self.persist();
+        Ok(updated)
+    }
+
+    /// 复习轮次推进（完成一轮：轮次 + 完成时间 + 可选状态变更）
+    fn unit_advance(
+        &mut self,
+        id: &str,
+        round: u32,
+        completed_at: i64,
+        status: Option<&str>,
+    ) -> Result<VocabularyUnit, String> {
+        let unit = self
+            .units
+            .iter_mut()
+            .find(|u| u.id == id)
+            .ok_or_else(|| format!("unit not found: {id}"))?;
+        unit.round = round;
+        unit.last_completed_at = Some(completed_at);
+        if let Some(status) = status {
+            unit.status = status.to_string();
+        }
+        let updated = unit.clone();
+        self.persist();
+        Ok(updated)
+    }
+
+    /// 智能分组落地：为每组创建自动单元并批量移动词条（先全量校验，避免半写入）
+    fn group_apply(&mut self, groups: &[GroupSpec], now: i64) -> Result<Vec<VocabularyUnit>, String> {
+        for group in groups {
+            if group.name.trim().is_empty() {
+                return Err("empty unit name".into());
+            }
+            if group.entry_ids.is_empty() {
+                return Err("empty group".into());
+            }
+            for id in &group.entry_ids {
+                if !self.entries.iter().any(|e| e.id == *id) {
+                    return Err(format!("vocabulary entry not found: {id}"));
+                }
+            }
+        }
+        let mut created = Vec::with_capacity(groups.len());
+        for group in groups {
+            let unit = VocabularyUnit {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: group.name.trim().to_string(),
+                created_at: now,
+                kind: UNIT_KIND_AUTO.to_string(),
+                capacity: group.capacity.unwrap_or(DEFAULT_UNIT_CAPACITY),
+                status: UNIT_STATUS_ACTIVE.to_string(),
+                round: 0,
+                last_completed_at: None,
+                seed: group.seed.clone(),
+                locked: false,
+                order: self.units.len() as i64,
+            };
+            for entry in self
+                .entries
+                .iter_mut()
+                .filter(|e| group.entry_ids.contains(&e.id))
+            {
+                entry.unit_id = unit.id.clone();
+            }
+            self.units.push(unit.clone());
+            created.push(unit);
+        }
+        self.persist();
+        Ok(created)
+    }
+
+    /// 撤销一次自动分组：删除批内单元（词条自动回收进收词箱），返回删除的单元数
+    fn group_undo(&mut self, unit_ids: &[String]) -> u32 {
+        let before = self.units.len();
+        self.units.retain(|u| !unit_ids.contains(&u.id));
+        let removed = (before - self.units.len()) as u32;
+        if removed > 0 {
+            for entry in self.entries.iter_mut() {
+                if unit_ids.contains(&entry.unit_id) {
+                    entry.unit_id = INBOX_UNIT_ID.to_string();
+                }
+            }
+            self.persist();
+        }
+        removed
     }
 
     /// 合并前端调度结果 + reviewCount+1（pickdict review 语义；id 不存在报错）
@@ -291,6 +544,9 @@ impl VocabState {
         entry.due_at = next.due_at;
         entry.last_reviewed_at = next.last_reviewed_at;
         entry.review_count += 1;
+        if let Some(grade) = next.grade.as_deref() {
+            entry.last_grade = Some(grade.to_string());
+        }
         let updated = entry.clone();
         self.persist();
         Ok(updated)
@@ -361,8 +617,39 @@ impl VocabularyStore {
         self.with(|s| s.units.clone())
     }
 
-    pub fn unit_create(&self, name: &str, now: i64) -> Result<VocabularyUnit, String> {
-        self.with(|s| s.unit_create(name, now))?
+    pub fn unit_create(
+        &self,
+        name: &str,
+        now: i64,
+        opts: &UnitCreateOpts,
+    ) -> Result<VocabularyUnit, String> {
+        self.with(|s| s.unit_create(name, now, opts))?
+    }
+
+    pub fn unit_update(&self, id: &str, patch: &UnitPatch) -> Result<VocabularyUnit, String> {
+        self.with(|s| s.unit_update(id, patch))?
+    }
+
+    pub fn unit_advance(
+        &self,
+        id: &str,
+        round: u32,
+        completed_at: i64,
+        status: Option<&str>,
+    ) -> Result<VocabularyUnit, String> {
+        self.with(|s| s.unit_advance(id, round, completed_at, status))?
+    }
+
+    pub fn group_apply(
+        &self,
+        groups: &[GroupSpec],
+        now: i64,
+    ) -> Result<Vec<VocabularyUnit>, String> {
+        self.with(|s| s.group_apply(groups, now))?
+    }
+
+    pub fn group_undo(&self, unit_ids: &[String]) -> Result<u32, String> {
+        self.with(|s| s.group_undo(unit_ids))
     }
 
     pub fn unit_rename(&self, id: &str, name: &str) -> Result<(), String> {
@@ -449,8 +736,13 @@ pub fn vocabulary_unit_create(
     store: tauri::State<'_, VocabularyStore>,
     app: tauri::AppHandle,
     name: String,
+    kind: Option<String>,
+    capacity: Option<u32>,
+    seed: Option<String>,
+    locked: Option<bool>,
 ) -> Result<VocabularyUnit, String> {
-    let unit = store.unit_create(&name, now_ms())?;
+    let opts = UnitCreateOpts { kind, capacity, seed, locked };
+    let unit = store.unit_create(&name, now_ms(), &opts)?;
     broadcast_change(&app);
     Ok(unit)
 }
@@ -488,6 +780,112 @@ pub fn vocabulary_move(
     store.move_entry(&id, &unit_id)?;
     broadcast_change(&app);
     Ok(())
+}
+
+/// 更新单元元数据（容量 / 名称 / 状态 / 锁定 / 显示序）
+#[tauri::command]
+pub fn vocabulary_unit_update(
+    store: tauri::State<'_, VocabularyStore>,
+    app: tauri::AppHandle,
+    id: String,
+    patch: UnitPatch,
+) -> Result<VocabularyUnit, String> {
+    let unit = store.unit_update(&id, &patch)?;
+    broadcast_change(&app);
+    Ok(unit)
+}
+
+/// 智能分组落地：创建自动单元 + 批量移动词条，并记入 unit-log（供撤销）
+#[tauri::command]
+pub fn vocabulary_group_apply(
+    store: tauri::State<'_, VocabularyStore>,
+    log: tauri::State<'_, crate::unitlog::UnitLogStore>,
+    app: tauri::AppHandle,
+    groups: Vec<GroupSpec>,
+) -> Result<Vec<VocabularyUnit>, String> {
+    let now = now_ms();
+    let created = store.group_apply(&groups, now)?;
+    let entry_count = groups.iter().map(|g| g.entry_ids.len() as u32).sum();
+    log.record_group(crate::unitlog::GroupRecord {
+        at: now,
+        unit_ids: created.iter().map(|u| u.id.clone()).collect(),
+        entry_count,
+    });
+    broadcast_change(&app);
+    Ok(created)
+}
+
+/// 撤销最近一次智能分组（无记录 → 0，静默；单元删除、词条回收进收词箱）
+#[tauri::command]
+pub fn vocabulary_group_undo(
+    store: tauri::State<'_, VocabularyStore>,
+    log: tauri::State<'_, crate::unitlog::UnitLogStore>,
+    app: tauri::AppHandle,
+) -> Result<u32, String> {
+    let Some(record) = log.last_group() else {
+        return Ok(0);
+    };
+    let removed = store.group_undo(&record.unit_ids)?;
+    log.drop_last_group();
+    if removed > 0 {
+        broadcast_change(&app);
+    }
+    Ok(removed)
+}
+
+/// 提交单元复习轮次：写 unit-log + 推进单元进度（轮次 / 完成时间 / 可选状态）
+#[tauri::command]
+pub fn vocabulary_unit_round_commit(
+    store: tauri::State<'_, VocabularyStore>,
+    log: tauri::State<'_, crate::unitlog::UnitLogStore>,
+    app: tauri::AppHandle,
+    unit_id: String,
+    record: RoundRecordInput,
+) -> Result<VocabularyUnit, String> {
+    let now = now_ms();
+    let updated = store.unit_advance(&unit_id, record.round, now, record.status.as_deref())?;
+    log.record_round(crate::unitlog::RoundRecord {
+        unit_id: updated.id.clone(),
+        unit_name: updated.name.clone(),
+        round: record.round,
+        started_at: record.started_at,
+        completed_at: now,
+        size: record.size,
+        again: record.again,
+        hard: record.hard,
+        good: record.good,
+        easy: record.easy,
+        again_pending: record.again_pending,
+    });
+    broadcast_change(&app);
+    Ok(updated)
+}
+
+/// 提交单元抽查记录（不改轮次进度；评分已由 vocabulary_review 单独写入）
+#[tauri::command]
+pub fn vocabulary_unit_check_commit(
+    log: tauri::State<'_, crate::unitlog::UnitLogStore>,
+    app: tauri::AppHandle,
+    unit_id: String,
+    sampled: u32,
+    missed: Vec<String>,
+) -> Result<(), String> {
+    log.record_check(crate::unitlog::CheckRecord {
+        unit_id,
+        at: now_ms(),
+        sampled,
+        missed,
+    });
+    broadcast_change(&app);
+    Ok(())
+}
+
+/// 单元日志全量（轮次 / 抽查 / 分组；前端自取切片）
+#[tauri::command]
+pub fn vocabulary_unit_log(
+    log: tauri::State<'_, crate::unitlog::UnitLogStore>,
+) -> Result<crate::unitlog::UnitLogSnapshot, String> {
+    log.snapshot()
 }
 
 /// 任何变更后广播（pickdict broadcastChange 语义；发起者窗口也收到，刷新幂等无害）
@@ -621,7 +1019,7 @@ mod tests {
         for field in [
             "\"normKey\"", "\"addedAt\"", "\"easeFactor\"", "\"intervalDays\"",
             "\"repetitions\"", "\"dueAt\"", "\"lastReviewedAt\"", "\"reviewCount\"", "\"lapses\"",
-            "\"unitId\"",
+            "\"unitId\"", "\"lastGrade\"",
         ] {
             assert!(text.contains(field), "缺少字段 {field}");
         }
@@ -633,9 +1031,10 @@ mod tests {
         let dir = temp_dir("unit");
         let store = VocabularyStore::open(&dir);
 
-        let unit = store.unit_create(" Unit 1 ", 100).unwrap();
+        let opts = UnitCreateOpts::default();
+        let unit = store.unit_create(" Unit 1 ", 100, &opts).unwrap();
         assert_eq!(unit.name, "Unit 1", "名称 trim");
-        assert!(store.unit_create("   ", 100).is_err(), "空名报错");
+        assert!(store.unit_create("   ", 100, &opts).is_err(), "空名报错");
 
         let entry = store.add("word", 100).unwrap().entry;
         assert_eq!(entry.unit_id, INBOX_UNIT_ID, "新词落收词箱");
@@ -678,5 +1077,136 @@ mod tests {
         let list = store.list().unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].unit_id, INBOX_UNIT_ID, "缺省 unitId → 收词箱");
+    }
+
+    #[test]
+    fn legacy_unit_without_new_fields_gets_defaults() {
+        let dir = temp_dir("legacy-unit");
+        let path = dir.join("vocabulary.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"entries":[],"units":[{"id":"u1","name":"旧单元","createdAt":5}]}"#,
+        )
+        .unwrap();
+
+        let store = VocabularyStore::open(&dir);
+        let units = store.units().unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].kind, UNIT_KIND_MANUAL);
+        assert_eq!(units[0].capacity, DEFAULT_UNIT_CAPACITY);
+        assert_eq!(units[0].status, UNIT_STATUS_ACTIVE);
+        assert_eq!(units[0].round, 0);
+        assert!(units[0].last_completed_at.is_none());
+        assert!(units[0].seed.is_none());
+        assert!(!units[0].locked);
+        assert_eq!(units[0].order, 0);
+    }
+
+    #[test]
+    fn unit_metadata_patch_and_advance() {
+        let dir = temp_dir("unit-meta");
+        let store = VocabularyStore::open(&dir);
+        let unit = store.unit_create("Unit", 100, &UnitCreateOpts::default()).unwrap();
+
+        let patched = store
+            .unit_update(&unit.id, &UnitPatch { capacity: Some(12), ..Default::default() })
+            .unwrap();
+        assert_eq!(patched.capacity, 12);
+        assert!(patched.locked, "手改即锁定");
+        assert!(store.unit_update(&unit.id, &UnitPatch { name: Some("  ".into()), ..Default::default() }).is_err());
+        assert!(store.unit_update(INBOX_UNIT_ID, &UnitPatch::default()).is_err(), "收词箱不可改");
+
+        let unlocked = store
+            .unit_update(&unit.id, &UnitPatch { locked: Some(false), ..Default::default() })
+            .unwrap();
+        assert!(!unlocked.locked, "显式传值可解绑");
+
+        let advanced = store.unit_advance(&unit.id, 1, 5_000, Some(UNIT_STATUS_DONE)).unwrap();
+        assert_eq!(advanced.round, 1);
+        assert_eq!(advanced.last_completed_at, Some(5_000));
+        assert_eq!(advanced.status, UNIT_STATUS_DONE);
+        assert!(store.unit_advance("missing", 1, 0, None).is_err());
+    }
+
+    #[test]
+    fn group_apply_creates_units_and_undo_recycles() {
+        let dir = temp_dir("group");
+        let store = VocabularyStore::open(&dir);
+        let a = store.add("apple", 1).unwrap().entry;
+        let b = store.add("apply", 1).unwrap().entry;
+        let c = store.add("banana", 1).unwrap().entry;
+
+        let groups = vec![
+            GroupSpec {
+                name: "a- 词族".into(),
+                seed: Some("morph:a".into()),
+                capacity: Some(10),
+                entry_ids: vec![a.id.clone(), b.id.clone()],
+            },
+            GroupSpec {
+                name: "其他".into(),
+                seed: None,
+                capacity: None,
+                entry_ids: vec![c.id.clone()],
+            },
+        ];
+        let created = store.group_apply(&groups, 100).unwrap();
+        assert_eq!(created.len(), 2);
+        assert_eq!(created[0].kind, UNIT_KIND_AUTO);
+        assert_eq!(created[0].capacity, 10);
+        assert_eq!(created[1].capacity, DEFAULT_UNIT_CAPACITY);
+
+        let list = store.list().unwrap();
+        let unit_of = |id: &str| list.iter().find(|e| e.id == id).unwrap().unit_id.clone();
+        assert_eq!(unit_of(&a.id), created[0].id);
+        assert_eq!(unit_of(&c.id), created[1].id);
+
+        // 校验失败不半写入（含不存在词条）
+        let bad = vec![GroupSpec {
+            name: "x".into(),
+            seed: None,
+            capacity: None,
+            entry_ids: vec![a.id.clone(), "missing".into()],
+        }];
+        assert!(store.group_apply(&bad, 100).is_err());
+        assert_eq!(store.units().unwrap().len(), 2, "失败不新增单元");
+        assert!(store
+            .group_apply(
+                &[GroupSpec { name: " ".into(), seed: None, capacity: None, entry_ids: vec![a.id.clone()] }],
+                100,
+            )
+            .is_err());
+
+        // 撤销：删单元 + 词回收进收词箱
+        let ids: Vec<String> = created.iter().map(|u| u.id.clone()).collect();
+        assert_eq!(store.group_undo(&ids).unwrap(), 2);
+        assert!(store.units().unwrap().is_empty());
+        let list = store.list().unwrap();
+        assert!(list.iter().all(|e| e.unit_id == INBOX_UNIT_ID), "词条回收进收词箱");
+    }
+
+    #[test]
+    fn review_records_last_grade_and_move_locks_unit() {
+        let dir = temp_dir("last-grade");
+        let store = VocabularyStore::open(&dir);
+        let entry = store.add("word", 1).unwrap().entry;
+        let unit = store.unit_create("U", 1, &UnitCreateOpts::default()).unwrap();
+
+        let next = ScheduleUpdate {
+            ease_factor: 2.5,
+            interval_days: 1.0,
+            repetitions: 1,
+            lapses: 0,
+            due_at: 2,
+            last_reviewed_at: Some(2),
+            grade: Some("hard".into()),
+        };
+        let updated = store.review(&entry.id, &next).unwrap();
+        assert_eq!(updated.last_grade.as_deref(), Some("hard"));
+
+        // 移入单元 → 目标单元锁定（自动重跑不覆盖用户的调整）
+        store.move_entry(&entry.id, &unit.id).unwrap();
+        let units = store.units().unwrap();
+        assert!(units[0].locked, "手改内容即锁定");
     }
 }
