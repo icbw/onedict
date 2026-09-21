@@ -2,6 +2,7 @@ mod ai;
 mod autostart;
 mod data;
 mod dictionary;
+mod edge_tts;
 mod fsutil;
 mod history;
 mod ocr;
@@ -11,6 +12,7 @@ mod reviewlog;
 mod selection;
 mod sys;
 mod tray;
+mod tts;
 mod unitlog;
 mod update;
 mod vocabulary;
@@ -233,6 +235,7 @@ pub fn run() {
             prefs::prefs_set_ocr_vision_model,
             prefs::prefs_set_ocr_auto_recognize,
             prefs::prefs_set_check_update_on_startup,
+            prefs::prefs_set_pronounce,
             ocr::ocr_recognize_region,
             ocr::ocr_capture_region,
             ocr::ocr_recognize_captured,
@@ -245,6 +248,10 @@ pub fn run() {
             webdict::webdict_lookup,
             webdict::webdict_audio,
             webdict::webdict_clear_cache,
+            edge_tts::edge_tts_voices,
+            edge_tts::edge_tts_synthesize,
+            tts::tts_voices,
+            tts::tts_synthesize,
             data::data_backup,
             data::data_restore,
             data::data_location,

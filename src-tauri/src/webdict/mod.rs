@@ -1,4 +1,4 @@
-//! 在线词典（有道）。分层：**Rust 只做 HTTP 传输**（复用
+//! 在线词典（有道 / 剑桥 / 必应）。分层：**Rust 只做 HTTP 传输**（复用
 //! reqwest，绕 webview CORS），HTML 语义理解全部在前端 webview（DOMParser +
 //! DOMPurify，见 src/services/webdict/）——与 AI 管线同构。
 //!
@@ -32,7 +32,7 @@ const CACHE_CAP: usize = 200;
 const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// 发音资源 host 白名单（精确或 `.<host>` 子域后缀）。
-const AUDIO_HOSTS: &[&str] = &["dict.youdao.com", "dictionary.cambridge.org"];
+const AUDIO_HOSTS: &[&str] = &["dict.youdao.com", "dictionary.cambridge.org", "bing.com"];
 
 // ── 静态注册表：dict_id → URL 构造（URL 只在 Rust 侧成形） ──
 
@@ -54,6 +54,17 @@ fn build_url(dict_id: &str, word: &str) -> Option<String> {
             )
             .ok()?;
             u.path_segments_mut().ok()?.push(word.trim());
+            Some(u.into())
+        }
+        //  必应：客户端条目页（轻量 HTML，含英汉/英英/网络三个标签面板）
+        "web-bing" => {
+            let mut u = Url::parse("https://cn.bing.com/dict/clientsearch").ok()?;
+            u.query_pairs_mut()
+                .append_pair("mkt", "zh-CN")
+                .append_pair("setLang", "zh")
+                .append_pair("form", "BDVEHC")
+                .append_pair("ClientVer", "BDDTV3.5.1.4320")
+                .append_pair("q", word.trim());
             Some(u.into())
         }
         _ => None,
@@ -313,6 +324,21 @@ mod tests {
     }
 
     #[test]
+    fn build_url_bing_carries_query_params() {
+        let u = build_url("web-bing", "hello world").unwrap();
+        let parsed = Url::parse(&u).unwrap();
+        assert_eq!(parsed.path(), "/dict/clientsearch");
+        let pairs: HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+        assert_eq!(pairs.get("q").map(String::as_str), Some("hello world"));
+        assert_eq!(pairs.get("mkt").map(String::as_str), Some("zh-CN"));
+        // 词头里的 & 与 / 是内容不是分隔符（query_pairs 负责 percent 编码）
+        let u2 = build_url("web-bing", "a&b/c").unwrap();
+        let parsed2 = Url::parse(&u2).unwrap();
+        let pairs2: HashMap<_, _> = parsed2.query_pairs().into_owned().collect();
+        assert_eq!(pairs2.get("q").map(String::as_str), Some("a&b/c"));
+    }
+
+    #[test]
     fn lru_evicts_oldest_beyond_cap() {
         let mut c = LruCache {
             map: HashMap::new(),
@@ -331,6 +357,8 @@ mod tests {
         assert!(audio_host_allowed("dict.youdao.com"));
         assert!(audio_host_allowed("a.dict.youdao.com"));
         assert!(audio_host_allowed("dictionary.cambridge.org"));
+        assert!(audio_host_allowed("bing.com"));
+        assert!(audio_host_allowed("cn.bing.com"));
         assert!(!audio_host_allowed("evilyoudao.com"));
         assert!(!audio_host_allowed("youdao.com.evil.io"));
         assert!(!audio_host_allowed(""));

@@ -16,7 +16,7 @@
 import { fetchWebDictDom } from "./fetchDom";
 import { WebdictError } from "./errors";
 import { sanitizeInner } from "./sanitize";
-import { speaker } from "./youdao";
+import { accentFromLabel, speaker } from "./speaker";
 import type { WebDictResult } from "./index";
 
 const HOST = "https://dictionary.cambridge.org";
@@ -104,7 +104,8 @@ export async function cambridgeSearch(word: string): Promise<WebDictResult> {
                 region ? `<span class="dictCambridge-Region">${escapeHtml(region)}</span>` : "",
                 ipa ? `/${escapeHtml(ipa)}/` : "",
               ].join(" ");
-              return `<span class="dictCambridge-Pron">${label}${url ? speaker(url) : ""}</span>`;
+              // 区域标签（UK / US）→ 锚点口音标记：合成兜底按它选英 / 美音色
+              return `<span class="dictCambridge-Pron">${label}${url ? speaker(url, accentFromLabel(region)) : ""}</span>`;
             })
             .join("") +
           `</div>`,

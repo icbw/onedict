@@ -16,7 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
-import { BookOpenText, Check, ChevronDown, ChevronRight, Dices, ExternalLink, Globe, Keyboard, OctagonX, Pencil, Plus, RotateCcw, Settings2, Trash2, X } from "lucide-react";
+import { BookOpenText, Check, ChevronDown, ChevronRight, Dices, ExternalLink, Globe, Keyboard, OctagonX, Pencil, Plus, RotateCcw, Settings2, Trash2, Volume2, X } from "lucide-react";
 import { DynamicIcon, iconNames, type IconName } from "lucide-react/dynamic";
 import { DragDropContext, Draggable, Droppable, type DropResult } from "@hello-pangea/dnd";
 import ToolbarPill from "../components/ToolbarPill";
@@ -73,19 +73,28 @@ import {
 import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import { cn } from "../lib/utils";
 import { WEB_DICTS, webItemsFromDictItems } from "../services/webdict";
+import { listVoices, speak, type VoiceInfo } from "../services/tts";
+import { listEdgeVoices, speakEdgeQueued, type EdgeVoiceInfo } from "../services/edgeTts";
+import {
+  parseSlotValue,
+  SAY_GENDER_CLASS,
+  sayButtonsOf,
+} from "../services/voiceRouter";
+import { DEFAULT_WORD_CHAIN, wordChainOf, type WordSource } from "../services/pronounce";
 import { DEFAULT_AI_DICT_PROMPT } from "./panel/AiDictSection";
 import AboutSection from "./panel/AboutSection";
 import { useUpdateAvailable } from "../lib/useUpdateAvailable";
-import type { AiPrefs, ApiType, DictItemPref, ModelCapability, ModelEntry, PrefsPayload, ProviderConfig } from "../types/prefs";
+import type { AiPrefs, ApiType, DictItemPref, ModelCapability, ModelEntry, PrefsPayload, PronouncePrefs, ProviderConfig } from "../types/prefs";
 import type { DictMeta } from "../types/dictionary";
 
-type Section = "models" | "selection" | "capture" | "dictionary" | "hotkeys" | "data" | "general" | "about";
+type Section = "models" | "selection" | "capture" | "dictionary" | "pronounce" | "hotkeys" | "data" | "general" | "about";
 
 const SECTIONS: Array<{ value: Section; label: string }> = [
   { value: "models", label: "模型服务" },
   { value: "selection", label: "划词助手" },
   { value: "capture", label: "截图助手" },
   { value: "dictionary", label: "词典" },
+  { value: "pronounce", label: "发音" },
   { value: "hotkeys", label: "快捷键" },
   { value: "data", label: "数据" },
   // 通用殿后：默认落点（模型服务）不变；环境级开关与侧栏底部的版本/日志区相邻
@@ -234,6 +243,7 @@ export default function SettingsTab({ active = true }: { active?: boolean }) {
         {section === "selection" && <SelectionSection prefsTick={prefsTick} />}
         {section === "capture" && <CaptureSection />}
         {section === "dictionary" && <DictionarySection />}
+        {section === "pronounce" && <PronounceSection prefsTick={prefsTick} />}
         {section === "hotkeys" && <HotkeysSection prefsTick={prefsTick} />}
         {section === "data" && <DataSection />}
         {section === "general" && <GeneralSection />}
@@ -455,6 +465,398 @@ function CaptureSection() {
             识别语言自动判断（中文优先，无需配置）。源语言提示仅告知 AI 原文语言，
             用于纠正相似语言的误判。翻译目标独立于「翻译」页。图译模型建议选支持视觉的
             小模型（如 qwen3-vl-flash）。
+          </p>
+        </div>
+      </SettingGroup>
+    </SettingsContentColumn>
+  );
+}
+
+/** 发音源全集（链的取值域；未启用的源按此序排在列表尾部） */
+const PRONOUNCE_SOURCES: Array<{ id: WordSource; name: string; desc: string }> = [
+  { id: "dict", name: "本地词典录音", desc: "词典自带的真人发音（最快最准；只覆盖词典收录的词）" },
+  { id: "webdict", name: "在线词典音频", desc: "有道 / 剑桥 / 必应的发音音频（需联网；有道的为合成音）" },
+  { id: "edge", name: "Edge 在线语音", desc: "微软自然语音（Xiaoxiao / Aria 等；音质最好，需联网）" },
+  { id: "tts", name: "系统语音", desc: "Windows 本地语音合成（离线可用；下方可选语音与语速）" },
+];
+
+/** 语音显示名（与「讲述人 → 选择语音」同风格：名称 (Natural) - 语言） */
+function voiceLabel(v: VoiceInfo): string {
+  return `${v.name}${v.natural ? " (Natural)" : ""} - ${v.language}`;
+}
+
+/** 语音槽定义（语言 · 口音 · 性别 → 槽 key；槽值存 `local:<id>` / `edge:<shortName>`。
+ *  语言与性别前缀用于过滤下拉候选；槽位没有「自动」态：缺槽由后端补默认音源） */
+const VOICE_SLOT_DEFS: Array<{
+  key: string;
+  label: string;
+  edgeLocale: string;
+  edgeGender: string;
+  localLang: string;
+  localGender: string;
+}> = [
+  { key: "zh-f", label: "中文 · 女声", edgeLocale: "zh", edgeGender: "Female", localLang: "zh", localGender: "female" },
+  { key: "zh-m", label: "中文 · 男声", edgeLocale: "zh", edgeGender: "Male", localLang: "zh", localGender: "male" },
+  { key: "en-us-f", label: "英文 · 美音 · 女声", edgeLocale: "en-us", edgeGender: "Female", localLang: "en-us", localGender: "female" },
+  { key: "en-us-m", label: "英文 · 美音 · 男声", edgeLocale: "en-us", edgeGender: "Male", localLang: "en-us", localGender: "male" },
+  { key: "en-gb-f", label: "英文 · 英音 · 女声", edgeLocale: "en-gb", edgeGender: "Female", localLang: "en-gb", localGender: "female" },
+  { key: "en-gb-m", label: "英文 · 英音 · 男声", edgeLocale: "en-gb", edgeGender: "Male", localLang: "en-gb", localGender: "male" },
+];
+
+/**
+ * 发音：朗读源链（拖拽排序 + 逐项启停）+ 系统语音（中 / 英各一）+ 语速 + 兜底开关。
+ *
+ * 链即启用集：拖动整行调优先级，关 = 移出链（再开 = 追加到链尾）。
+ * 语音来自 Windows 语音库（`tts_voices`）——与讲述人同一份；列表里没有的语音需先到
+ * 系统「设置 → 时间和语言 → 语音」安装，回本页点「刷新」。
+ */
+function PronounceSection({ prefsTick = 0 }: { prefsTick?: number }) {
+  const [prefs, setPrefs] = useState<PronouncePrefs | null>(null);
+  const [voices, setVoices] = useState<VoiceInfo[]>([]);
+  const [voiceErr, setVoiceErr] = useState<string | null>(null);
+  /** Edge 在线语音（可选；拉取失败不影响本地语音） */
+  const [edgeVoices, setEdgeVoices] = useState<EdgeVoiceInfo[]>([]);
+  const [edgeErr, setEdgeErr] = useState<string | null>(null);
+  const [hint, setHint] = useState<string | null>(null);
+  const [rateDraft, setRateDraft] = useState<number | null>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    void invoke<PrefsPayload>("prefs_get")
+      .then((p) => {
+        if (!alive) return;
+        setPrefs(p.pronounce);
+        setLoaded(true);
+      })
+      .catch(() => {});
+    void listVoices()
+      .then((list) => {
+        if (alive) setVoices(list);
+      })
+      .catch((e) => {
+        if (alive) setVoiceErr(e instanceof Error ? e.message : String(e));
+      });
+    void listEdgeVoices()
+      .then((list) => {
+        if (alive) setEdgeVoices(list);
+      })
+      .catch((e) => {
+        if (alive) setEdgeErr(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      alive = false;
+    };
+  }, [prefsTick]);
+
+  const save = (patch: Partial<PronouncePrefs>) => {
+    if (!prefs) return;
+    const next = { ...prefs, ...patch };
+    setPrefs(next);
+    void invoke("prefs_set_pronounce", { pronounce: next }).catch(() => {});
+  };
+
+  const chain = prefs ? wordChainOf(prefs) : DEFAULT_WORD_CHAIN;
+  const disabledSources = PRONOUNCE_SOURCES.filter((s) => !chain.includes(s.id));
+  const rateValue = rateDraft ?? prefs?.rate ?? 1;
+  /** 句子朗读双按钮音色（说明文字与行内颜色标识用；与播放端同一推导） */
+  const sayButtons = prefs ? sayButtonsOf(prefs) : null;
+
+  const onDragEnd = (r: DropResult) => {
+    if (!r.destination || r.destination.index === r.source.index) return;
+    save({ wordChain: moveItem(chain, r.source.index, r.destination.index) });
+  };
+
+  const toggleSource = (id: WordSource, on: boolean) => {
+    save({ wordChain: on ? [...chain, id] : chain.filter((s) => s !== id) });
+  };
+
+  const commitRate = () => {
+    if (rateDraft !== null && prefs && Math.abs(rateDraft - prefs.rate) > 0.001) {
+      save({ rate: rateDraft });
+    }
+    setRateDraft(null);
+  };
+
+  /** 槽试听：按该槽的语言读示例句，音源就是该槽配置的音色 */
+  const previewSlot = async (def: (typeof VOICE_SLOT_DEFS)[number]) => {
+    if (!prefs) return;
+    const text = def.key.startsWith("zh")
+      ? "你好，这是当前声音的中文试听。"
+      : "Hello, this is a voice preview.";
+    setHint(null);
+    const configured = parseSlotValue(prefs.voiceSlots?.[def.key]);
+    try {
+      if (configured?.kind === "edge") {
+        await speakEdgeQueued(text, configured.id, prefs.rate);
+        return;
+      }
+      if (configured?.kind === "local") {
+        await speak(text, { voiceId: configured.id, rate: prefs.rate });
+        return;
+      }
+      throw new Error("该槽未配置音源（点「刷新」重读偏好后重试）");
+    } catch (e) {
+      setHint(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  /** 写入 / 清除某个语音槽（空值即删除该键，落盘只留已配置的槽） */
+  const setSlot = (key: string, value: string) => {
+    const next = { ...(prefs?.voiceSlots ?? {}) };
+    if (value) next[key] = value;
+    else delete next[key];
+    save({ voiceSlots: next });
+  };
+
+  /** 语音槽下拉：Edge 在线与本地系统语音分组列出（按该槽的语言 / 性别过滤） */
+  const slotSelect = (def: (typeof VOICE_SLOT_DEFS)[number]) => {
+    const value = prefs?.voiceSlots?.[def.key] ?? "";
+    const edgeOpts = edgeVoices.filter(
+      (v) => v.locale.toLowerCase().startsWith(def.edgeLocale) && v.gender === def.edgeGender,
+    );
+    const localOpts = voices.filter(
+      (v) => v.language.toLowerCase().startsWith(def.localLang) && v.gender === def.localGender,
+    );
+    return (
+      <select
+        value={value}
+        onChange={(e) => setSlot(def.key, e.target.value)}
+        className="h-7 w-72 cursor-pointer rounded-md border border-border bg-background px-2 text-xs outline-none focus:ring-1 focus:ring-primary/40"
+      >
+        {edgeOpts.length > 0 && (
+          <optgroup label="Edge 在线语音">
+            {edgeOpts.map((v) => (
+              <option key={v.shortName} value={`edge:${v.shortName}`}>
+                {v.friendlyName}
+              </option>
+            ))}
+          </optgroup>
+        )}
+        {localOpts.length > 0 && (
+          <optgroup label="本地系统语音">
+            {localOpts.map((v) => (
+              <option key={v.id} value={`local:${v.id}`}>
+                {voiceLabel(v)}
+              </option>
+            ))}
+          </optgroup>
+        )}
+      </select>
+    );
+  };
+
+  /** 朗读按钮的英文口音倾向选择（按钮 1 = 女声、按钮 2 = 男声；性别不可选）。
+   *  明细文案走 hover（即时 Tooltip，原生 title 有 ~0.5s 延迟）。 */
+  const buttonAccentSelect = (which: "a" | "b") => {
+    const info = sayButtons?.[which === "a" ? 0 : 1];
+    const value = info?.accent ?? (which === "a" ? "us" : "gb");
+    return (
+      <Tooltip content="英文播放口音" placement="bottom">
+        <select
+          value={value}
+          onChange={(e) =>
+            save(which === "a" ? { sayBtnA: e.target.value } : { sayBtnB: e.target.value })
+          }
+          className="h-7 w-32 cursor-pointer rounded-md border border-border bg-background px-2 text-xs outline-none focus:ring-1 focus:ring-primary/40"
+        >
+          <option value="us">美音</option>
+          <option value="gb">英音</option>
+        </select>
+      </Tooltip>
+    );
+  };
+
+  return (
+    <SettingsContentColumn>
+      <SettingGroup>
+        <SettingTitle>朗读源（单词）</SettingTitle>
+        <SettingDescription>
+          单词发音按顺序逐项尝试，取第一个可用的音源；拖动整行调优先级，关闭即停用。
+          把合成源（Edge / 系统语音）拖到最前 = 不等真人音频，全部走合成语音。
+        </SettingDescription>
+        <div className="mt-3 flex flex-col gap-3">
+          {!loaded || !prefs ? (
+            <div className="py-2 text-muted-foreground text-xs">加载中…</div>
+          ) : (
+            <DragDropContext onDragEnd={onDragEnd}>
+              <Droppable droppableId="pronounce-chain">
+                {(prov) => (
+                  <div ref={prov.innerRef} {...prov.droppableProps} className="mt-1 mb-1">
+                    {chain.map((id, i) => {
+                      const src = PRONOUNCE_SOURCES.find((s) => s.id === id);
+                      if (!src) return null;
+                      return (
+                        <Draggable key={id} draggableId={id} index={i}>
+                          {(drag, snapshot) => (
+                            <div
+                              ref={drag.innerRef}
+                              {...drag.draggableProps}
+                              {...drag.dragHandleProps}
+                              className={cn(
+                                "mb-2 flex select-none items-center gap-2 rounded-md border border-border bg-background px-2 py-1.5",
+                                "cursor-move transition-colors last:mb-0 hover:bg-accent/40",
+                                snapshot.isDragging && "z-10 shadow-md",
+                              )}
+                            >
+                              <span className="w-4 shrink-0 text-center text-muted-foreground text-xs">
+                                {i + 1}
+                              </span>
+                              <div className="min-w-0 flex-1">
+                                <SettingRowTitle>{src.name}</SettingRowTitle>
+                                <div className="mt-0.5 text-muted-foreground text-xs">{src.desc}</div>
+                              </div>
+                              <Switch checked onCheckedChange={() => toggleSource(id, false)} />
+                            </div>
+                          )}
+                        </Draggable>
+                      );
+                    })}
+                    {prov.placeholder}
+                    {disabledSources.map((src) => (
+                      <div
+                        key={src.id}
+                        className="mb-2 flex items-center gap-2 rounded-md border border-border border-dashed bg-background px-2 py-1.5 opacity-60 last:mb-0"
+                      >
+                        <span className="w-4 shrink-0" />
+                        <div className="min-w-0 flex-1">
+                          <SettingRowTitle>{src.name}</SettingRowTitle>
+                          <div className="mt-0.5 text-muted-foreground text-xs">{src.desc}</div>
+                        </div>
+                        <Switch checked={false} onCheckedChange={() => toggleSource(src.id, true)} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </Droppable>
+            </DragDropContext>
+          )}
+          <p className="text-muted-foreground text-xs">
+            词典录音与在线音频只覆盖单词；句子朗读（翻译结果 / 截图识别 / 例句）走下方「声音」的
+            合成语音设置。
+          </p>
+        </div>
+      </SettingGroup>
+
+      <SettingGroup>
+        <SettingTitle>声音</SettingTitle>
+        <SettingDescription>
+          给每种「语言 · 口音 · 性别」指定音源（Edge 在线语音或本地系统语音；六槽默认已填好常用
+          音色，逐项可改，每个都能试听）。没有双按钮的入口（词条发音兜底、生词卡、截图朗读）按
+          语言与口音取女声槽；音源取不到时按朗读链降级，最终兜底本机（系统）语音。
+        </SettingDescription>
+        <div className="mt-3 flex flex-col gap-4">
+          {voiceErr && <p className="text-destructive text-xs">本地语音列表读取失败：{voiceErr}</p>}
+          {edgeErr && <p className="text-destructive text-xs">在线语音列表读取失败：{edgeErr}</p>}
+          {loaded && prefs ? (
+            <>
+              {/* 声音资源：六槽（语言 · 口音 · 性别）→ 音源 + 试听 */}
+              <div className="flex flex-col gap-2">
+                <SettingRowTitle>声音资源</SettingRowTitle>
+                {VOICE_SLOT_DEFS.map((def) => (
+                  <div key={def.key} className="flex items-center gap-2">
+                    <span className="w-40 shrink-0 text-xs">{def.label}</span>
+                    {slotSelect(def)}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void previewSlot(def)}
+                    >
+                      <Volume2 className="size-3.5" />
+                      试听
+                    </Button>
+                  </div>
+                ))}
+              </div>
+
+              {/* 例句 / 译文 / AI 词典原词旁并列的两个朗读按钮：只设英文口音倾向 */}
+              <div className="flex flex-col gap-2">
+                <SettingRowTitle>朗读按钮</SettingRowTitle>
+                {(["a", "b"] as const).map((which) => {
+                  const gender = which === "a" ? "f" : "m";
+                  return (
+                    <div key={which} className="flex items-center gap-2">
+                      <span className="flex w-40 shrink-0 items-center gap-1.5 text-xs">
+                        {gender === "f" ? "女声" : "男声"}
+                        <Volume2 className={cn("size-3.5", SAY_GENDER_CLASS[gender])} />
+                      </span>
+                      {buttonAccentSelect(which)}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <SettingRow>
+                  <SettingRowTitle>英文口音默认</SettingRowTitle>
+                  <select
+                    value={prefs.enAccent ?? ""}
+                    onChange={(e) => save({ enAccent: e.target.value })}
+                    className="h-7 w-44 cursor-pointer rounded-md border border-border bg-background px-2 text-xs outline-none focus:ring-1 focus:ring-primary/40"
+                  >
+                    <option value="">自动（美音优先）</option>
+                    <option value="us">美音（en-US）</option>
+                    <option value="gb">英音（en-GB）</option>
+                  </select>
+                </SettingRow>
+                <SettingRow>
+                  <SettingRowTitle>语速</SettingRowTitle>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={1.5}
+                      step={0.05}
+                      value={rateValue}
+                      onChange={(e) => setRateDraft(Number(e.target.value))}
+                      onPointerUp={commitRate}
+                      onKeyUp={commitRate}
+                      onBlur={commitRate}
+                      className="h-1.5 w-40 cursor-pointer appearance-none rounded-full bg-border accent-primary"
+                    />
+                    <span className="w-12 text-right text-muted-foreground text-xs">
+                      {rateValue.toFixed(2)}×
+                    </span>
+                  </div>
+                </SettingRow>
+                <SettingRow>
+                  <div className="min-w-0 flex-1">
+                    <SettingRowTitle>词条无发音时自动用合成语音</SettingRowTitle>
+                    <SettingDescription>
+                      词典未收录该词发音（或在线音频取不到）时，改用合成语音补读。
+                    </SettingDescription>
+                  </div>
+                  <Switch
+                    checked={prefs.fallbackMissing ?? true}
+                    onCheckedChange={(v) => save({ fallbackMissing: v })}
+                  />
+                </SettingRow>
+              </div>
+            </>
+          ) : (
+            <div className="py-2 text-muted-foreground text-xs">加载中…</div>
+          )}
+          <p className="flex flex-wrap items-center gap-2 text-muted-foreground text-xs">
+            <span>
+              {hint ?? `本地 ${voices.length} 个语音 · 在线 ${edgeVoices.length} 个语音。`}
+            </span>
+            <button
+              type="button"
+              className="cursor-pointer text-primary hover:underline"
+              onClick={() => {
+                setVoiceErr(null);
+                setEdgeErr(null);
+                void listVoices(true)
+                  .then(setVoices)
+                  .catch((e) => setVoiceErr(e instanceof Error ? e.message : String(e)));
+                void listEdgeVoices(true)
+                  .then(setEdgeVoices)
+                  .catch((e) => setEdgeErr(e instanceof Error ? e.message : String(e)));
+              }}
+            >
+              刷新
+            </button>
           </p>
         </div>
       </SettingGroup>

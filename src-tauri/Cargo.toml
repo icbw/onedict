@@ -1,6 +1,6 @@
 [package]
 name = "onedict"
-version = "0.2.3"
+version = "0.2.4"
 description = "划词查词 / 词典 / 生词卡"
 authors = ["Bowen C"]
 edition = "2021"
@@ -35,6 +35,11 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 futures-util = "0.3"
 # 在线词典（webdict）：URL 构造与 host 解析（MIT/Apache-2.0；reqwest 传递依赖显式化）
 url = "2"
+# Edge 在线语音合成（非官方 Read Aloud 接口）：WebSocket 客户端
+# （MIT OR Apache-2.0；native-tls 复用 reqwest 既有 schannel，url 复用已有依赖）
+tungstenite = { version = "0.30", features = ["native-tls", "url"] }
+# Sec-MS-GEC 时间签名（MIT OR Apache-2.0；传递依赖图已有 0.10.x——updater 的 minisign）
+sha2 = "0.10"
 # 全局快捷键（tauri 官方插件，MIT/Apache；仅 Rust 侧使用，不需 npm 包）
 tauri-plugin-global-shortcut = "2"
 # 单实例（官方插件，MIT/Apache）：多开会全局快捷键注册冲突 + JSON 并发写互覆
@@ -80,6 +85,11 @@ windows = { version = "0.61", features = [
   "Globalization",
   "Graphics_Imaging",
   "Storage_Streams",
+  # 本地朗读：WinRT 语音合成（系统内置语音库，含讲述人 Natural 语音；零新依赖）。
+  # Media_Core 必需——合成方法被 all(Media_Core, Storage_Streams) 门控（仅
+  # Media_SpeechSynthesis 时方法不生成）
+  "Media_SpeechSynthesis",
+  "Media_Core",
 ] }
 
 [profile.release]

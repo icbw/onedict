@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { ArrowUpRight, ChevronUp, Copy, Loader2, ScanText, Sparkles, TextSelect } from "lucide-react";
+import { ArrowUpRight, ChevronUp, Copy, Loader2, ScanText, Sparkles, TextSelect, Volume2 } from "lucide-react";
 import { buildLineTranslatePrompt, buildStructuredOcrPrompt, buildVisionOcrPrompt } from "../lib/actionPrompts";
 import { aiReady } from "../lib/aiConfig";
 import { targetLangByCode, sourceLangCompat } from "../lib/translate";
@@ -10,8 +10,9 @@ import { mergeOcrResult } from "../lib/ocrAlign";
 import LangSelect from "../components/LangSelect";
 import CaptureBar from "../components/CaptureBar";
 import { AiBody, useAiStream } from "./panel/aiParts";
+import { speakSentence, type PronounceHint } from "../services/pronounce";
 import type { AiStreamConfig, AiStreamMessage } from "../services/aiStream";
-import type { PrefsPayload } from "../types/prefs";
+import type { PrefsPayload, PronouncePrefs } from "../types/prefs";
 
 /** OCR 识别行（Rust OcrLineOut；x/y/w/h = 屏幕物理坐标 words 并集，空 = 0） */
 interface OcrLine {
@@ -202,6 +203,10 @@ export default function OcrCaptureApp() {
   /** AI 图译模型未设置提示（点击图译按钮时校验；展开卡内提示引导） */
   const [visionHint, setVisionHint] = useState(false);
   const [error, setError] = useState("");
+  /** 发音偏好（朗读识别结果；null = 未读到） */
+  const [pronounce, setPronounce] = useState<PronouncePrefs | null>(null);
+  /** 朗读状态提示（合成中 / 失败；完成清空） */
+  const [speakHint, setSpeakHint] = useState<PronounceHint | null>(null);
   /** 目标语言（"auto" = 译为中文）。**会话级临时选择**（废止「即改
    *  即存写回偏好」）：截图浮层内一切语言选择不写偏好，设置页是唯一默认入口 */
   const [targetPref, setTargetPref] = useState("auto");
@@ -218,6 +223,20 @@ export default function OcrCaptureApp() {
   /** 整体拖动基准（快照 img 按下记录鼠标与当前偏移；根层 move/up 驱动） */
   const panBase = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
   const { content, error: aiError, loading, run, reset } = useAiStream();
+
+  // 发音偏好（朗读按钮用）：挂载读取 + prefs-changed 即时跟随（设置页改语音即生效）
+  useEffect(() => {
+    const load = () => {
+      void invoke<PrefsPayload>("prefs_get")
+        .then((p) => setPronounce(p.pronounce ?? null))
+        .catch(() => {});
+    };
+    load();
+    const un = listen("prefs-changed", load);
+    return () => {
+      void un.then((f) => f(), () => {});
+    };
+  }, []);
 
   // 行级协议流式解析：增量全量重解析（行数小零成本），部分行就绪即渲染叠加。
   // degraded 仅在流式结束后判定（首 token 空窗/前导语不得触发降级）
@@ -292,6 +311,16 @@ export default function OcrCaptureApp() {
   const hide = useCallback(() => {
     void invoke("ocr_hide_capture").catch(() => {});
   }, []);
+
+  /** 朗读识别结果：优先已就绪的译文（逐行拼接），无译文读原文 */
+  const speakResult = useCallback(() => {
+    if (!pronounce) return;
+    const text = (translatedText || ocrText).trim();
+    if (!text) return;
+    void speakSentence(text, pronounce, setSpeakHint).catch((e) => {
+      setSpeakHint({ text: e instanceof Error ? e.message : String(e), kind: "error" });
+    });
+  }, [pronounce, translatedText, ocrText]);
 
   /** 复制截图快照后退出（复制即完成使命）。复制失败同样退出——
    *  低频兜底不阻塞；剪贴板写入是系统调用，失败无恢复动作可做 */
@@ -1053,6 +1082,14 @@ export default function OcrCaptureApp() {
             </button>
             <button
               type="button"
+              onClick={speakResult}
+              title="朗读（优先译文，无译文读原文）"
+              className="shrink-0 rounded p-1.5 text-neutral-600 hover:bg-neutral-100 hover:text-primary [cursor:pointer]"
+            >
+              <Volume2 className="size-3.5" />
+            </button>
+            <button
+              type="button"
               onClick={() => {
                 if (ocrText) void invoke("clipboard_write", { text: ocrText }).catch(() => {});
               }}
@@ -1069,6 +1106,17 @@ export default function OcrCaptureApp() {
             >
               <Copy className="size-3.5" />
             </button>
+            {speakHint && (
+              <span
+                className={
+                  speakHint.kind === "error"
+                    ? "truncate text-destructive text-xs"
+                    : "truncate text-neutral-500 text-xs"
+                }
+              >
+                {speakHint.text}
+              </span>
+            )}
             <span className="flex-1" />
             <button
               type="button"

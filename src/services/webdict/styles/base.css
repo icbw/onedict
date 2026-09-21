@@ -44,3 +44,7 @@ ul, ol { margin: 0.3em 0; padding-left: 1.6em; }
   color: #2e7d3c;
   text-decoration: none;
 }
+/* 播放中（单通道：再点同一喇叭即停）——高亮让「哪条在播」可见 */
+.webdict-Speaker.is-playing {
+  color: #c2410c;
+}

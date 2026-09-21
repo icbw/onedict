@@ -8,13 +8,16 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowRight, Globe2 } from "lucide-react";
+import { ArrowRight, Globe2, Volume2 } from "lucide-react";
 import { applyPromptTemplate, builtinPrompt } from "../../lib/actionPrompts";
 import { activeProvider, effectiveModelName, modelThinking } from "../../lib/aiConfig";
 import { targetLangByCode } from "../../lib/translate";
 import LangSelect from "../../components/LangSelect";
 import type { AiStreamConfig, AiStreamMessage } from "../../services/aiStream";
-import type { PrefsPayload } from "../../types/prefs";
+import { speakSentence, type PronounceHint } from "../../services/pronounce";
+import { detectLang } from "../../services/tts";
+import { SAY_GENDER_CLASS, sayButtonLabel, sayButtonsOf } from "../../services/voiceRouter";
+import type { PrefsPayload, PronouncePrefs } from "../../types/prefs";
 import { AiBody, AiFooter, ShowOriginal, useAiStream } from "./aiParts";
 
 export default function ActionTranslate({
@@ -36,6 +39,10 @@ export default function ActionTranslate({
 }) {
   const [langCode, setLangCode] = useState("zh-cn");
   const [cardThinking, setCardThinking] = useState(false);
+  /** 发音偏好（朗读译文；null = 未读到） */
+  const [pronounce, setPronounce] = useState<PronouncePrefs | null>(null);
+  /** 朗读状态提示（合成中 / 失败；完成清空） */
+  const [speakHint, setSpeakHint] = useState<PronounceHint | null>(null);
   const { content, error, loading, run, stop } = useAiStream();
 
   // 目标语言偏好（pickdict feature.translate.action.preferred_lang 语义，与翻译 Tab 共享）
@@ -44,6 +51,7 @@ export default function ActionTranslate({
     void invoke<PrefsPayload>("prefs_get")
       .then((p) => {
         if (p.translateLang) setLangCode(p.translateLang);
+        setPronounce(p.pronounce ?? null);
         // 思考门禁逐模型化：动作模型覆盖 ?? 全局默认（与 ai_stream 回退序一致）
         setCardThinking(modelThinking(activeProvider(p.ai), effectiveModelName(model, p.ai)));
       })
@@ -56,6 +64,20 @@ export default function ActionTranslate({
   };
 
   const targetLang = targetLangByCode(langCode);
+
+  /** 朗读译文（分句流水播放，状态经 speakHint 提示）：双按钮 = 按钮 1 女声 /
+   *  按钮 2 男声（图标颜色即性别：红 / 蓝），英文口音倾向见设置页 */
+  const sayPair = pronounce ? sayButtonsOf(pronounce) : null;
+
+  const speakOut = async (which: "a" | "b") => {
+    if (!pronounce || !content.trim()) return;
+    const button = sayButtonsOf(pronounce)[which === "b" ? 1 : 0];
+    try {
+      await speakSentence(content, pronounce, setSpeakHint, button);
+    } catch (e) {
+      setSpeakHint({ text: e instanceof Error ? e.message : String(e), kind: "error" });
+    }
+  };
 
   const messages = useMemo<AiStreamMessage[]>(() => {
     if (!text.trim()) return [];
@@ -95,12 +117,44 @@ export default function ActionTranslate({
             className="max-w-[160px] min-w-[100px] justify-between rounded bg-muted px-2 py-1 text-sm transition-colors hover:bg-accent"
           />
         </div>
-        <div className="ml-auto flex shrink-0 items-center">
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          {(["a", "b"] as const).map((which, i) => {
+            const info = sayPair?.[i];
+            const tip = info
+              ? `朗读译文（${sayButtonLabel(info, detectLang(content))}）`
+              : "朗读译文";
+            return (
+              <button
+                key={which}
+                type="button"
+                disabled={!content.trim()}
+                title={tip}
+                aria-label={tip}
+                onClick={() => void speakOut(which)}
+                className="flex cursor-pointer items-center opacity-70 transition-opacity hover:opacity-100 disabled:cursor-default disabled:opacity-40"
+              >
+                <Volume2
+                  className={`size-3.5 ${info ? SAY_GENDER_CLASS[info.gender] : "text-muted-foreground"}`}
+                />
+              </button>
+            );
+          })}
           <ShowOriginal text={text} />
         </div>
       </div>
 
       <AiBody content={content} error={error} loading={loading} className="mt-3" />
+      {speakHint && (
+        <p
+          className={
+            speakHint.kind === "error"
+              ? "mt-2 w-full text-destructive text-xs"
+              : "mt-2 w-full text-muted-foreground text-xs"
+          }
+        >
+          {speakHint.text}
+        </p>
+      )}
       <AiFooter
         loading={loading}
         content={content}

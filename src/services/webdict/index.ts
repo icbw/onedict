@@ -2,8 +2,10 @@
  *  id 与 Rust 侧 src-tauri/src/webdict/mod.rs 的 build_url 注册表对齐；
  *  显示名/实现/样式由本目录定义（不落盘）。 */
 import baseCss from "./styles/base.css?raw";
+import bingCss from "./styles/bing.css?raw";
 import cambridgeCss from "./styles/cambridge.css?raw";
 import youdaoCss from "./styles/youdao.css?raw";
+import { bingSearch, bingWordFromUrl } from "./bing";
 import { cambridgeSearch, cambridgeWordFromUrl } from "./cambridge";
 import { youdaoSearch, youdaoWordFromUrl } from "./youdao";
 import type { DictItemPref } from "../../types/prefs";
@@ -42,6 +44,14 @@ export const WEB_DICTS: Record<string, WebDictDef> = {
     search: cambridgeSearch,
     css: baseCss + cambridgeCss,
   },
+  "web-bing": {
+    id: "web-bing",
+    label: "必应词典",
+    srcPage: (w) =>
+      `https://cn.bing.com/dict/search?q=${encodeURIComponent(w.replace(/\s+/g, " "))}`,
+    search: bingSearch,
+    css: baseCss + bingCss,
+  },
 };
 
 /** 统一 dictItems 列表 → 在线条目（id 前缀 `web-`，序随统一列表）。
@@ -61,11 +71,13 @@ export function webItemsFromDictItems(
 }
 
 /** 真外链 → 查询词（词典外链「转内部查词」模式）：
- *  ① 各源词链接钩子（youdao 站内 /w/、word=、q=）；② 通用 URL query 词参数；
+ *  ① 各源词链接钩子（youdao 站内 /w/ 与 word=、cambridge 站内词链、bing /dict/ 查询）；
+ *  ② 通用 URL query 词参数；
  *  ③ 链接文本（BOOT_SCRIPT 随 onedict-external 附带，≤40 字且非 URL 形态）。
  *  全部落空返回 null（版权页/来源站等非词链接不动）。 */
 export function wordFromExternalLink(url: string, text?: string): string | null {
-  const w = youdaoWordFromUrl(url) ?? cambridgeWordFromUrl(url);
+  const w =
+    youdaoWordFromUrl(url) ?? cambridgeWordFromUrl(url) ?? bingWordFromUrl(url);
   if (w) return w;
   try {
     const u = new URL(url);

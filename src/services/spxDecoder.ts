@@ -59,24 +59,38 @@ export interface SpxDecoderOptions {
 }
 
 let mod: SpeexModule | null = null
+/** 最近一次初始化失败原因（null = 未尝试过或已就绪）。解码器不可用时随错误一起上屏，
+ *  否则调用方只能拿到「未就绪」这一句，无从判断是 vendor 求值失败还是 wasm 实例化失败 */
+let initError: string | null = null
 let logError: (message: string) => void = (m) => console.error(`[spx] ${m}`)
 
 /**
- * 激活期调用一次（幂等）；失败则 .spx 解码禁用，走原字节回退。
- * evaluate 的实现约定：求值 options.code 后返回 SpeexFactory 工厂
+ * 激活期调用一次（幂等，**未就绪时可重复调用**：首载失败 / 前端热更新重建模块后
+ * 再点发音即自愈）。evaluate 的实现约定：求值 options.code 后返回 SpeexFactory 工厂
  * （webview：`new Function(code + ';return SpeexFactory;')`；
  * node：vm.runInContext 后取 sandbox.SpeexFactory）。
  */
 export async function initSpxDecoder(options: SpxDecoderOptions): Promise<void> {
   if (mod) return
   logError = options.logError ?? logError
-  const factory = options.evaluate(options.code) as (() => Promise<SpeexModule>) | undefined
-  if (typeof factory !== 'function') throw new Error('vendor speex.js 未导出 SpeexFactory')
-  mod = await factory()
+  try {
+    const factory = options.evaluate(options.code) as (() => Promise<SpeexModule>) | undefined
+    if (typeof factory !== 'function') throw new Error('vendor speex.js 未导出 SpeexFactory')
+    mod = await factory()
+    initError = null
+  } catch (e) {
+    initError = e instanceof Error ? e.message : String(e)
+    throw e
+  }
 }
 
 export function isSpxDecoderReady(): boolean {
   return mod !== null
+}
+
+/** 解码器不可用的原因（null = 已就绪或尚未尝试初始化）——调用方据此给出可排查的提示 */
+export function spxDecoderError(): string | null {
+  return initError
 }
 
 const OGGS = 0x5367674f // "OggS" 小端读取（'O' 为 LSB）
@@ -189,7 +203,9 @@ function toWav(pcm: Int16Array, sampleRate: number): Uint8Array {
  * 解不开（非 Speex/unsupported 形态/数据损坏）时抛错。
  */
 export function decodeSpxToWav(bytes: Uint8Array): { wav: Uint8Array; sampleRate: number } {
-  if (!mod) throw new Error('spx decoder not initialized')
+  if (!mod) {
+    throw new Error(initError ? `speex 解码器初始化失败：${initError}` : 'speex 解码器尚未就绪')
+  }
   const t0 = performance.now()
 
   const packets = parseOggPackets(bytes)

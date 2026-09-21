@@ -43,8 +43,10 @@ import { cn } from "../../lib/utils";
 import { applySm2, type ReviewGrade } from "../../services/sm2";
 import { buildSrcdoc } from "../../services/dictFrame";
 import { fetchSoundData } from "../../services/dictSound";
+import { playSoundData, stopSpeaking } from "../../services/tts";
+import { firstSoundKey, speakWord } from "../../services/pronounce";
 import type { DictMeta, LookupResult } from "../../types/dictionary";
-import type { PrefsPayload } from "../../types/prefs";
+import type { PrefsPayload, PronouncePrefs } from "../../types/prefs";
 import type { VocabularyEntry } from "../../types/vocabulary";
 
 /** 会话类型：轮次复习（记单元轮次）/ 抽查（记抽查记录）/ 专项（不确定词，仅练习） */
@@ -141,6 +143,8 @@ export default function ReviewDialog({
   const [soundHint, setSoundHint] = useState<string | null>(null);
   /** 学习卡自动发音偏好（设置页词典子页开关；prefs-changed 实时跟随） */
   const [autoPronounce, setAutoPronounce] = useState(false);
+  /** 发音偏好（朗读源链 / 语音 / 语速；null = 未读到，发音按钮给提示） */
+  const [pronounce, setPronounce] = useState<PronouncePrefs | null>(null);
   /** 启用词典缓存就绪标记（打开会话后 dictionary_list 异步返回置位——
    *  首张卡自动发音必须等它：effect 跑得比 IPC 快，词典未就绪会静默退出） */
   const [dictsReady, setDictsReady] = useState(false);
@@ -149,7 +153,10 @@ export default function ReviewDialog({
   useEffect(() => {
     const load = () => {
       void invoke<PrefsPayload>("prefs_get")
-        .then((p) => setAutoPronounce(p.reviewAutoPronounce ?? false))
+        .then((p) => {
+          setAutoPronounce(p.reviewAutoPronounce ?? false);
+          setPronounce(p.pronounce ?? null);
+        })
         .catch(() => {});
     };
     load();
@@ -209,56 +216,60 @@ export default function ReviewDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在队列清空瞬间触发一次
   }, [open, done, session]);
 
-  // 播放（父页 Audio：正面按钮与自动发音无用户手势链路；被拦截时提示重试）
+  // 播放（父页 Audio：正面按钮与自动发音无用户手势链路；被拦截时提示重试）。
+  // 统一走 services/tts 的单通道播放器——词典资源音频与系统语音合成共用一条通道，
+  // 自动发音与手动按钮、背面喇叭并发时不叠音。
   const playBase64 = (mime: string, base64: string) => {
-    try {
-      const audio = new Audio(`data:${mime};base64,${base64}`);
-      audio.play().catch(() => {
-        setSoundHint("浏览器阻止了自动播放，请再点一次发音按钮");
-      });
-    } catch (err) {
-      setSoundHint(String(err));
-    }
+    stopSpeaking();
+    void playSoundData({ mime, base64 }).catch((err) => {
+      setSoundHint(err instanceof Error ? err.message : String(err));
+    });
   };
 
-  // 发音：第一部启用词典（与背面释义同源）——有释义缓存直接取，无则按需 lookup；
-  // 从 html 提取第一个 sound:// 资源键（href= 前缀限定，避开 BOOT_SCRIPT 中的字面量）
+  // 关窗即停（发音不比窗口活得久）
+  useEffect(() => {
+    if (open) return;
+    stopSpeaking();
+  }, [open]);
+
+  // 发音：走朗读源链（本地词典录音 → 在线音频 → 系统语音；设置页「发音」可配）。
+  // 词典资源键惰性取——翻过面直接用缓存 HTML，未翻面才 lookup（第一部启用词典）；
+  // 无 MDD 发音的词由链兜底到系统语音（此前直接提示「未收录」）。
   const speak = async () => {
     const card = queue[index];
-    const dictId = dictsRef.current[0]?.id;
     if (!card) return;
-    if (!dictId) {
-      // 词典缓存未就绪（自动发音早于 dictionary_list 返回）或没有启用词典 → 给提示而非静默
-      setSoundHint(dictsReady ? "没有启用的词典，请到设置页词典目录启用" : "词典加载中，请稍候再试");
+    const prefs = pronounce;
+    if (!prefs) {
+      setSoundHint("发音配置尚未就绪，请稍候再试");
       return;
     }
     const seq = ++speakSeq.current;
-    setSoundHint("发音获取中…");
+    const report = (hint: { text: string; kind: "info" | "error" } | null) => {
+      if (seq === speakSeq.current) setSoundHint(hint?.text ?? null);
+    };
     try {
-      let entryHtml = htmlRef.current;
-      if (entryHtml == null) {
-        const result = await invoke<LookupResult>("dictionary_lookup", {
-          dictId,
-          word: card.word,
-        });
-        if (speakSeq.current !== seq) return;
-        entryHtml = result.html;
-        htmlRef.current = entryHtml;
-      }
-      if (entryHtml == null) return; // 不可达（上分支已赋值），供 TS 控制流收敛
-      const m = /href=["']sound:\/\/([^"']+)["']/i.exec(entryHtml);
-      if (!m) {
-        if (speakSeq.current === seq) setSoundHint("该词典未收录此词的发音资源");
-        return;
-      }
-      const data = await fetchSoundData(dictId, m[1]);
-      if (speakSeq.current !== seq) return;
-      setSoundHint(null);
-      playBase64(data.mime, data.base64);
+      await speakWord(card.word, {
+        prefs,
+        loadDictSound: async () => {
+          const dictId = dictsRef.current[0]?.id;
+          if (!dictId) return null;
+          let entryHtml = htmlRef.current;
+          if (entryHtml == null) {
+            const result = await invoke<LookupResult>("dictionary_lookup", {
+              dictId,
+              word: card.word,
+            });
+            if (speakSeq.current !== seq) return null;
+            entryHtml = result.html;
+            htmlRef.current = entryHtml;
+          }
+          const key = entryHtml ? firstSoundKey(entryHtml) : null;
+          return key ? { dictId, key } : null;
+        },
+        onStatus: report,
+      });
     } catch (err) {
-      if (speakSeq.current === seq) {
-        setSoundHint(err instanceof Error ? err.message : String(err));
-      }
+      report({ text: err instanceof Error ? err.message : String(err), kind: "error" });
     }
   };
 
@@ -291,6 +302,7 @@ export default function ReviewDialog({
   const resetCard = () => {
     revealSeq.current++;
     speakSeq.current++;
+    stopSpeaking();
     setRevealed(false);
     setHtml(null);
     htmlRef.current = null;
@@ -494,7 +506,12 @@ export default function ReviewDialog({
                         ref={iframeRef}
                         title={`review-card-${current.id}`}
                         sandbox="allow-scripts"
-                        srcDoc={buildSrcdoc(html)}
+                        // allow="autoplay"：卡面发音在帧内 new Audio(...).play()，沙箱帧
+                        // 是 opaque origin ⇒ 缺这条会被权限策略拒（NotAllowedError）
+                        allow="autoplay"
+                        // say:false —— 复习卡帧只听 onedict-sound，不接 onedict-speak：
+                        // 注入例句朗读按钮只会是「点了没反应」的哑按钮
+                        srcDoc={buildSrcdoc(html, undefined, { say: false })}
                         className="block h-full w-full border-0 bg-white"
                       />
                     ) : (

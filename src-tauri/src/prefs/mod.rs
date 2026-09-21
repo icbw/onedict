@@ -12,6 +12,7 @@
 //!   clipboard_lookup   剪贴板监听查词（复制即查，默认关）
 //!   ai                 AI 服务配置（OpenAI 兼容端点；None = 未配置）
 //!   translate_lang     AI 翻译目标语言（pickdict feature.translate.action.preferred_lang 语义）
+//!   pronounce          发音（朗读源链 + 系统语音选择；本地 TTS 接入）
 
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -106,6 +107,9 @@ pub struct Preferences {
     /// 启动时检查更新（默认关——无提示的后台请求按需开启；开关只在下次启动生效）
     #[serde(default)]
     pub check_update_on_startup: bool,
+    /// 发音（朗读源链 + 系统语音选择；本地 TTS 接入）
+    #[serde(default)]
+    pub pronounce: PronouncePrefs,
     // ── legacy 字段（反序列化捕获后由 migrate_web_dicts 迁入 dict_items，不再序列化）──
     #[serde(default, skip_serializing)]
     pub web_dicts: Option<Vec<WebDictItemPref>>,
@@ -136,6 +140,7 @@ impl Default for Preferences {
             selection_filter_list: Vec::new(),
             removed_dicts: Vec::new(),
             check_update_on_startup: false,
+            pronounce: PronouncePrefs::default(),
             ocr_lang: String::new(),
             ocr_target_lang: String::new(),
             ocr_vision_model: String::new(),
@@ -443,6 +448,109 @@ impl HotkeysPref {
     }
 }
 
+/// 发音偏好（本地 TTS 接入）：朗读源链 + 语音选择 + 场景路由。
+///
+/// 链语义：数组序即优先级，逐项尝试取第一个可用；项缺席 = 停用。
+/// 值域：`dict`（本地词典 MDD 录音）/ `webdict`（在线词典音频）/ `edge`（Edge 在线自然
+/// 语音）/ `tts`（本地系统语音）。
+///
+/// 语音选择分两层：
+/// 1. **语音槽**（`voice_slots`）——按 `语言-口音-性别` 指定音源，六槽：
+///    `zh-f` / `zh-m` / `en-us-f` / `en-us-m` / `en-gb-f` / `en-gb-m`；
+///    值 = `local:<语音id>` 或 `edge:<shortName>`。**没有「自动」态**：键缺失即补
+///    `default_voice_slots()` 的默认音源，配置始终完整。
+/// 2. **朗读按钮**（`say_btn_a` / `say_btn_b`）——并列按钮的英文口音倾向；性别固定
+///    （按钮 1 = 女、按钮 2 = 男），无按钮入口按语言 / 口音取女声槽。
+/// 槽内音色实际不可用（列表拉取失败 / 语音已卸载 / 引擎不可达）时不另挑同类音色，
+/// 由朗读链降级到**本机引擎**（系统语音）兜底。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PronouncePrefs {
+    /// 单词发音链（缺省 dict → webdict → edge → tts）
+    pub word_chain: Vec<String>,
+    /// 句子朗读链（缺省 edge → tts）
+    pub sentence_chain: Vec<String>,
+    /// 六槽音源（键非法或值非 `local:`/`edge:` 前缀的条目在归一化时丢弃；
+    /// 缺槽由 `default_voice_slots()` 补齐）
+    #[serde(default)]
+    pub voice_slots: std::collections::BTreeMap<String, String>,
+    /// 朗读按钮 A 的英文口音倾向（`us` / `gb`）：两个并列按钮（例句 / 译文 /
+    /// AI 词典原词旁）的**性别固定**——按钮 1（A）= 女声、按钮 2（B）= 男声，
+    /// 这里只选英文的美音 / 英音倾向；中文文本没有口音维度，固定取「中文 ·
+    /// 女声 / 男声」槽，与倾向无关。
+    #[serde(default)]
+    pub say_btn_a: String,
+    /// 朗读按钮 B 的英文口音倾向（语义同 A）
+    #[serde(default)]
+    pub say_btn_b: String,
+    /// 英文默认口音（"" = 自动（美音优先）/ "us" / "gb"）
+    #[serde(default)]
+    pub en_accent: String,
+    /// 语速（0.5–1.5；1.0 = 原速）
+    pub rate: f32,
+    /// 词条无发音资源时自动回退合成语音（合成文本取锚点附近内容，见前端帧脚本）
+    pub fallback_missing: bool,
+}
+
+impl Default for PronouncePrefs {
+    fn default() -> Self {
+        Self {
+            word_chain: vec!["dict".into(), "webdict".into(), "edge".into(), "tts".into()],
+            sentence_chain: vec!["edge".into(), "tts".into()],
+            voice_slots: default_voice_slots(),
+            say_btn_a: "us".into(),
+            say_btn_b: "gb".into(),
+            en_accent: String::new(),
+            rate: 1.0,
+            fallback_missing: true,
+        }
+    }
+}
+
+/// 链归一化：值域过滤 + 去空/去重（大小写归一）；语速夹到可调区间。
+/// 空链保留为空（= 该场景全部停用），不补默认项——归一化只做收窄不做扩张。
+pub fn normalize_pronounce(mut p: PronouncePrefs) -> PronouncePrefs {
+    fn clean(chain: &[String], allowed: &[&str]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for item in chain {
+            let item = item.trim().to_lowercase();
+            if allowed.contains(&item.as_str()) && !out.contains(&item) {
+                out.push(item);
+            }
+        }
+        out
+    }
+    p.word_chain = clean(&p.word_chain, &["dict", "webdict", "edge", "tts"]);
+    p.sentence_chain = clean(&p.sentence_chain, &["edge", "tts"]);
+    p.rate = p.rate.clamp(0.5, 1.5);
+    // 语音槽：键限六槽、值限 local:/edge: 前缀（其余条目丢弃；空值不落盘），
+    // 再把缺失的槽补上默认音源——槽位没有「自动」态，配置始终完整
+    let mut slots = std::collections::BTreeMap::new();
+    for (key, value) in p.voice_slots.iter() {
+        let key = key.trim().to_lowercase();
+        let value = value.trim();
+        if !VOICE_SLOT_KEYS.contains(&key.as_str()) || value.is_empty() {
+            continue;
+        }
+        if value.starts_with("local:") || value.starts_with("edge:") {
+            slots.insert(key, value.to_string());
+        }
+    }
+    for (key, value) in default_voice_slots() {
+        slots.entry(key).or_insert(value);
+    }
+    p.voice_slots = slots;
+    // 朗读按钮：值限英文口音倾向（非法 / 空 → 按按钮位回落默认：1 = 美音 / 2 = 英音）
+    p.say_btn_a = normalize_button_accent(&p.say_btn_a, "us");
+    p.say_btn_b = normalize_button_accent(&p.say_btn_b, "gb");
+    p.en_accent = match p.en_accent.trim().to_lowercase().as_str() {
+        "us" => "us".into(),
+        "gb" => "gb".into(),
+        _ => String::new(),
+    };
+    p
+}
+
 static PREFS: RwLock<Option<PrefState>> = RwLock::new(None);
 
 struct PrefState {
@@ -509,6 +617,9 @@ fn load_from(path: &Path) -> Preferences {
             //  过渡迁移：在线词典独立 webDicts 数组并入统一 dictItems
             // 尾部（id 前缀 web-），与本地词典并列排序。幂等：字段缺省即跳过。
             migrate_web_dicts(&mut p);
+            // 发音偏好同样在**读取路径**归一化：六槽补齐默认音源、链与语速收窄——
+            // 否则前端可能读到不完整的槽表（保存路径的归一化要等下次写盘才生效）
+            p.pronounce = normalize_pronounce(p.pronounce);
             p
         }
         Err(error) => {
@@ -753,6 +864,17 @@ pub fn set_ocr_auto_recognize(value: bool) {
     update(|p| p.ocr_auto_recognize = value);
 }
 
+/// 发音偏好快照（前端经 prefs_get 读取；Rust 侧暂无消费方——朗读链执行在前端）
+#[allow(dead_code)]
+pub fn pronounce() -> PronouncePrefs {
+    with(|s| s.value.pronounce.clone())
+}
+
+pub fn set_pronounce(prefs: PronouncePrefs) {
+    let normalized = normalize_pronounce(prefs);
+    update(|p| p.pronounce = normalized);
+}
+
 /// Rust 侧暂无消费方（前端经 prefs_get 读取）；预留对称 getter 保持模块 API 完整
 #[allow(dead_code)]
 pub fn translate_model() -> Option<String> {
@@ -766,6 +888,36 @@ pub fn set_translate_config(model: Option<String>, prompt: Option<String>, allow
         p.translate_allow_think = allow_think;
     });
 }
+
+/// 语音槽 key 全集（语言-口音-性别；前端路由与设置页共用同一值域）
+pub const VOICE_SLOT_KEYS: [&str; 6] = ["zh-f", "zh-m", "en-us-f", "en-us-m", "en-gb-f", "en-gb-m"];
+
+/// 六槽缺省音源（Edge 在线自然语音；中英 × 性别 × 口音各一）。
+/// 槽位无「自动」态：键缺失即取此默认，用户可在设置页逐槽改成本机语音或其他音色。
+fn default_voice_slots() -> std::collections::BTreeMap<String, String> {
+    [
+        ("zh-f", "edge:zh-CN-XiaoxiaoNeural"),
+        ("zh-m", "edge:zh-CN-YunjianNeural"),
+        ("en-us-f", "edge:en-US-AvaNeural"),
+        ("en-us-m", "edge:en-US-AndrewNeural"),
+        ("en-gb-f", "edge:en-GB-SoniaNeural"),
+        ("en-gb-m", "edge:en-GB-RyanNeural"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
+}
+
+/// 朗读按钮的英文口音倾向归一化：`us` / `gb` 原样（小写），其余回落默认
+fn normalize_button_accent(value: &str, fallback: &str) -> String {
+    match value.trim().to_lowercase().as_str() {
+        "us" => "us".into(),
+        "gb" => "gb".into(),
+        _ => fallback.to_string(),
+    }
+}
+
+
 
 // ── Tauri commands ──
 
@@ -797,6 +949,7 @@ pub struct PrefsPayload {
     pub ocr_vision_model: String,
     pub ocr_auto_recognize: bool,
     pub check_update_on_startup: bool,
+    pub pronounce: PronouncePrefs,
 }
 
 /// 偏好快照。**未初始化时返回 Err**：旧实现在此静默返回默认值，前端
@@ -835,6 +988,7 @@ pub fn prefs_get() -> Result<PrefsPayload, String> {
         ocr_vision_model: p.ocr_vision_model,
         ocr_auto_recognize: p.ocr_auto_recognize,
         check_update_on_startup: p.check_update_on_startup,
+        pronounce: p.pronounce,
     })
 }
 
@@ -945,6 +1099,30 @@ pub fn prefs_set_check_update_on_startup(app: tauri::AppHandle, enabled: bool) {
         tracing::warn!(target: "prefs", error = %e, "prefs-changed 广播失败");
     }
     tracing::info!(target: "prefs", enabled, "check update on startup updated");
+}
+
+/// 保存发音偏好（朗读源链 / 语音选择 / 语速 / 兜底开关；设置页即改即存）。
+/// 归一化在 `set_pronounce` 内完成（值域过滤 + 去重 + 语速夹取）；广播
+/// `prefs-changed` 驱动各窗口朗读链即时生效。
+#[tauri::command]
+pub fn prefs_set_pronounce(app: tauri::AppHandle, pronounce: PronouncePrefs) {
+    let normalized = normalize_pronounce(pronounce);
+    tracing::info!(
+        target: "prefs",
+        word_chain = ?normalized.word_chain,
+        sentence_chain = ?normalized.sentence_chain,
+        rate = normalized.rate,
+        fallback_missing = normalized.fallback_missing,
+        slots = normalized.voice_slots.len(),
+        btn_a = %normalized.say_btn_a,
+        btn_b = %normalized.say_btn_b,
+        "发音偏好已更新"
+    );
+    set_pronounce(normalized);
+    use tauri::Emitter;
+    if let Err(e) = app.emit("prefs-changed", ()) {
+        tracing::warn!(target: "prefs", error = %e, "prefs-changed 广播失败");
+    }
 }
 
 /// 保存词典外链走向开关（true = 浏览器打开，false = 转词典内部查词；
@@ -1355,5 +1533,88 @@ mod tests {
         assert!(p.hotkeys.is_none());
         // 快照 getter 回退默认
         assert_eq!(p.hotkeys.unwrap_or_default().toggle_selection(), "ctrl+alt+d");
+    }
+
+    #[test]
+    fn pronounce_roundtrip_and_legacy_default() {
+        let path = temp_path("pronounce");
+        let mut p = Preferences::default();
+        assert_eq!(
+            p.pronounce.word_chain,
+            vec!["dict", "webdict", "edge", "tts"]
+        );
+        assert_eq!(p.pronounce.sentence_chain, vec!["edge", "tts"]);
+        assert!(p.pronounce.fallback_missing);
+        p.pronounce.word_chain = vec!["tts".into(), "dict".into()];
+        p.pronounce.rate = 1.2;
+        p.pronounce = normalize_pronounce(p.pronounce);
+        save_to(&path, &p).unwrap();
+        // 读取路径同样归一化（六槽补齐默认），故往返前后完全一致
+        assert_eq!(load_from(&path), p);
+        assert_eq!(
+            p.pronounce.voice_slots.len(),
+            6,
+            "六槽无「自动」态：默认即已填满"
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"wordChain\""));
+        assert!(text.contains("\"fallbackMissing\""));
+        assert!(text.contains("\"voiceSlots\""));
+
+        // 旧文件缺 pronounce：整段回默认（链仍是完整三项）
+        let path2 = temp_path("pronounce-legacy");
+        std::fs::write(&path2, r#"{"selectionEnabled":true}"#).unwrap();
+        assert_eq!(load_from(&path2).pronounce, PronouncePrefs::default());
+    }
+
+    #[test]
+    fn pronounce_normalize_filters_and_clamps() {
+        let raw = PronouncePrefs {
+            word_chain: vec![
+                " TTS ".into(),
+                "tts".into(),
+                " EDGE ".into(),
+                "bogus".into(),
+                "dict".into(),
+            ],
+            sentence_chain: vec!["dict".into()],
+            voice_slots: [
+                (" EN-GB-M ".to_string(), " edge:en-GB-RyanNeural ".to_string()),
+                ("bogus".to_string(), "edge:x".to_string()),
+                ("zh-f".to_string(), "bad:value".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            say_btn_a: " US ".into(),
+            say_btn_b: "bogus".into(),
+            en_accent: " GB ".into(),
+            rate: 9.0,
+            fallback_missing: true,
+        };
+        let n = normalize_pronounce(raw);
+        assert_eq!(n.voice_slots.len(), 6, "槽位恒满：非法槽键被丢弃后由默认补齐");
+        assert_eq!(
+            n.voice_slots.get("en-gb-m").map(String::as_str),
+            Some("edge:en-GB-RyanNeural"),
+            "槽键归一化 + 值去空白 + 用户值优先于默认"
+        );
+        assert_eq!(
+            n.voice_slots.get("zh-f").map(String::as_str),
+            Some("edge:zh-CN-XiaoxiaoNeural"),
+            "非法值（bad:value）丢弃后回落该槽默认音源"
+        );
+        assert_eq!(n.say_btn_a, "us", "按钮口音倾向归一化（小写 + 去空白）");
+        assert_eq!(n.say_btn_b, "gb", "非法倾向回落按钮位默认（按钮 2 = 英音）");
+        assert_eq!(n.en_accent, "gb");
+        assert_eq!(
+            n.word_chain,
+            vec!["tts", "edge", "dict"],
+            "去重 + 大小写归一 + 非法值过滤"
+        );
+        assert!(
+            n.sentence_chain.is_empty(),
+            "句子链只认 edge/tts：非法项过滤后保持空（不补默认）"
+        );
+        assert_eq!(n.rate, 1.5, "语速夹到上限");
     }
 }

@@ -12,13 +12,10 @@
 import { fetchWebDictDom } from "./fetchDom";
 import { WebdictError } from "./errors";
 import { sanitizeInner } from "./sanitize";
+import { accentFromLabel, speaker } from "./speaker";
 import type { WebDictResult } from "./index";
 
 const HOST = "https://dict.youdao.com";
-
-/** Material volume_up 通用喇叭形状（发音锚点视觉） */
-const SPEAKER_PATH =
-  "M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z";
 
 /** 星级路径（saladict youdao/engine.ts 同款自绘 5 星） */
 const STAR_PATH =
@@ -28,11 +25,6 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string,
   );
-}
-
-/** 发音喇叭锚点（youdao/cambridge 共用；webaudio:// 由帧内 BOOT_SCRIPT 委托下载） */
-export function speaker(url: string): string {
-  return `<a class="webdict-Speaker" href="webaudio://${encodeURIComponent(url)}" aria-label="播放发音"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="${SPEAKER_PATH}"/></svg></a>`;
 }
 
 function starSvgs(rate: number, cls = "dictYoudao-Stars"): string {
@@ -154,8 +146,9 @@ export async function youdaoSearch(word: string): Promise<WebDictResult> {
         (stars > 0 ? starSvgs(stars) : "") +
         prons
           .map(
+            // 音标标签（英 / 美）→ 锚点口音标记：合成兜底按它选音色
             ({ phsym, url }) =>
-              `<span class="dictYoudao-Pron">${escapeHtml(phsym)} ${speaker(url)}</span>`,
+              `<span class="dictYoudao-Pron">${escapeHtml(phsym)} ${speaker(url, accentFromLabel(phsym))}</span>`,
           )
           .join("") +
         (rank ? `<span class="dictYoudao-Rank">${escapeHtml(rank)}</span>` : "") +

@@ -83,6 +83,32 @@ export interface AiPrefs {
   providers: ProviderConfig[];
 }
 
+/** 发音偏好（对应 Rust PronouncePrefs；本地 TTS 接入）。
+ *  链 = 有序优先级列表，逐项尝试取第一个可用；项缺席 = 停用。
+ *  值域：dict = 本地词典 MDD 录音 / webdict = 在线词典音频 / tts = 系统语音 */
+export interface PronouncePrefs {
+  /** 单词发音链（缺省 dict → webdict → edge → tts） */
+  wordChain: Array<"dict" | "webdict" | "edge" | "tts">;
+  /** 句子朗读链（缺省 edge → tts） */
+  sentenceChain: Array<"dict" | "webdict" | "edge" | "tts">;
+  /** 六槽音源（key = zh-f / zh-m / en-us-f / en-us-m / en-gb-f / en-gb-m；
+   *  值 = "local:<语音id>" | "edge:<shortName>"）。**没有「自动」态**：缺槽由后端
+   *  补默认音源（配置始终完整）；槽内音色不可用时由朗读链降级到本机引擎 */
+  voiceSlots: Record<string, string>;
+  /** 朗读按钮 A / B 的英文口音倾向（"us" / "gb"）：并列两个按钮（例句 / 译文 /
+   *  AI 词典原词旁）**性别固定**——按钮 1（A）= 女声、按钮 2（B）= 男声，
+   *  这里只选英文读美音还是英音；中文文本没有口音维度，固定取「中文 ·
+   *  女声 / 男声」槽，与倾向无关 */
+  sayBtnA: string;
+  sayBtnB: string;
+  /** 英文默认口音（"" = 自动（美音优先）/ "us" / "gb"） */
+  enAccent: string;
+  /** 语速（0.5–1.5；1.0 = 原速） */
+  rate: number;
+  /** 词条无发音资源时自动回退系统语音 */
+  fallbackMissing: boolean;
+}
+
 export interface PrefsPayload {
   /** 词典根目录绝对路径；null = 自动探测（dev：cwd 父链找 test/dicts） */
   dictRoot: string | null;
@@ -138,4 +164,6 @@ export interface PrefsPayload {
   ocrAutoRecognize: boolean;
   /** 启动时检查更新（默认关；检查动作只在下次启动生效，设置页内仍可手动检查） */
   checkUpdateOnStartup: boolean;
+  /** 发音（朗读源链 + 系统语音选择；旧文件缺字段由后端取默认） */
+  pronounce: PronouncePrefs;
 }

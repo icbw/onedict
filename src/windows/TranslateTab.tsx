@@ -28,6 +28,7 @@ import {
   Languages,
   Loader2,
   Settings2,
+  Volume2,
   X,
 } from "lucide-react";
 import { Button } from "@onedict/ui/components/button";
@@ -49,8 +50,11 @@ import { targetLangByCode } from "../lib/translate";
 import LangSelect from "../components/LangSelect";
 import { streamChat } from "../services/aiStream";
 import { Minimark } from "../services/minimark";
+import { speakSentence, type PronounceHint } from "../services/pronounce";
+import { detectLang } from "../services/tts";
+import { SAY_GENDER_CLASS, sayButtonLabel, sayButtonsOf } from "../services/voiceRouter";
 import type { TranslateHistoryEntry } from "../types/history";
-import type { AiPrefs, PrefsPayload } from "../types/prefs";
+import type { AiPrefs, PrefsPayload, PronouncePrefs } from "../types/prefs";
 
 export default function TranslateTab({ active = true }: { active?: boolean }) {
   /** AI 配置快照（跨卡模型分组与路由判定的唯一来源） */
@@ -67,6 +71,10 @@ export default function TranslateTab({ active = true }: { active?: boolean }) {
   const [modelOverride, setModelOverride] = useState("");
   const [promptOverride, setPromptOverride] = useState("");
   const [allowThink, setAllowThink] = useState(false);
+  /** 发音偏好（朗读译文；null = 未读到） */
+  const [pronounce, setPronounce] = useState<PronouncePrefs | null>(null);
+  /** 朗读状态提示（合成中 / 失败；完成清空） */
+  const [speakHint, setSpeakHint] = useState<PronounceHint | null>(null);
   const [input, setInput] = useState("");
   const [output, setOutput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -90,6 +98,7 @@ export default function TranslateTab({ active = true }: { active?: boolean }) {
         setModelOverride(p.translateModel ?? "");
         setPromptOverride(p.translatePrompt ?? "");
         setAllowThink(p.translateAllowThink);
+        setPronounce(p.pronounce ?? null);
         setLoaded(true);
       })
       .catch(() => {
@@ -269,6 +278,20 @@ export default function TranslateTab({ active = true }: { active?: boolean }) {
     const el = outputRef.current;
     if (el && loading) el.scrollTop = el.scrollHeight;
   }, [output, loading]);
+
+  /** 朗读译文（分句流水播放，状态经 speakHint 提示）：双按钮 = 按钮 1 女声 /
+   *  按钮 2 男声（图标颜色即性别：红 / 蓝），英文口音倾向见设置页 */
+  const sayPair = pronounce ? sayButtonsOf(pronounce) : null;
+
+  const speakOutput = async (which: "a" | "b") => {
+    if (!pronounce || !output.trim()) return;
+    const button = sayButtonsOf(pronounce)[which === "b" ? 1 : 0];
+    try {
+      await speakSentence(output, pronounce, setSpeakHint, button);
+    } catch (e) {
+      setSpeakHint({ text: e instanceof Error ? e.message : String(e), kind: "error" });
+    }
+  };
 
   const copy = () => {
     if (!output) return;
@@ -559,7 +582,42 @@ export default function TranslateTab({ active = true }: { active?: boolean }) {
               </div>
             )}
           </div>
-          <div className="flex items-center justify-end">
+          <div className="flex items-center justify-end gap-2">
+            {speakHint && (
+              <span
+                className={
+                  speakHint.kind === "error"
+                    ? "mr-auto text-destructive text-xs"
+                    : "mr-auto text-muted-foreground text-xs"
+                }
+              >
+                {speakHint.text}
+              </span>
+            )}
+            {(["a", "b"] as const).map((which, i) => {
+              const info = sayPair?.[i];
+              const tip = info ? `朗读译文（${sayButtonLabel(info, detectLang(output))}）` : "朗读译文";
+              return (
+                <Button
+                  key={which}
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  title={tip}
+                  aria-label={tip}
+                  onClick={() => void speakOutput(which)}
+                  disabled={!output || loading}
+                >
+                  <Volume2
+                    className={
+                      info
+                        ? `size-4 ${SAY_GENDER_CLASS[info.gender]}`
+                        : "size-4 text-muted-foreground"
+                    }
+                  />
+                </Button>
+              );
+            })}
             <Button
               type="button"
               variant="outline"

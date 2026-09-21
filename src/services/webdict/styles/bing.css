@@ -1,0 +1,104 @@
+/* 必应词条样式：版式语义参照 saladict bing/_style.shadow.scss（MIT）重写，
+   按本项目 webdict-box 白底体系对齐有道/剑桥分区。
+   站点原版样式被消毒剥掉，网络释义的编号/缩进由这里补最小排版。 */
+
+.dictBing-Header {
+  margin: 0.15em 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+.dictBing-Title {
+  font-size: 1.35em;
+  font-weight: 700;
+  margin: 0;
+}
+
+.dictBing-Pron {
+  color: #57606a;
+  font-size: 0.92em;
+  white-space: nowrap;
+}
+
+/* 释义：词性列 + 内容列（对齐沙拉词典的表格式排版） */
+.dictBing-CdefItem {
+  display: table;
+  width: 100%;
+  margin: 0.25em 0;
+}
+
+.dictBing-CdefPos {
+  display: table-cell;
+  width: 3.2em;
+  padding-right: 6px;
+  text-align: right;
+  vertical-align: top;
+  white-space: nowrap;
+  font-style: italic;
+  color: #8a6d3b;
+}
+
+.dictBing-CdefDef {
+  display: table-cell;
+  padding: 0 2px 0 8px;
+}
+
+.dictBing-CdefDef .client_def_list_item {
+  margin: 0.15em 0;
+}
+
+.dictBing-CdefDef .client_def_list_word_Tag {
+  float: left;
+  width: 15px;
+  color: #999;
+}
+
+.dictBing-CdefDef .client_web_con {
+  padding-left: 20px;
+  color: #444;
+}
+
+.dictBing-CdefDef .client_def_web_title {
+  color: #1a7f5a;
+}
+
+.dictBing-CdefDef .client_web_count {
+  color: #9a9a9a;
+  font-size: 0.9em;
+}
+
+/* 词形变化：形态名 + 可点击词形 */
+.dictBing-Inf {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
+.dictBing-InfForm {
+  color: #9a9a9a;
+  margin-right: 4px;
+}
+
+.dictBing-SentenceList {
+  margin: 0;
+  padding-left: 1.6em;
+}
+
+.dictBing-SentenceItem {
+  margin-bottom: 0.5em;
+}
+.dictBing-SentenceItem p {
+  margin: 0;
+}
+
+.dictBing-SentenceSource {
+  color: #9a9a9a;
+  font-size: 0.9em;
+}
+
+/* 例句内命中词高亮（站点原版色，消毒后 span 类名由引擎给出） */
+.dictBing-HL {
+  color: #f9690e;
+}
