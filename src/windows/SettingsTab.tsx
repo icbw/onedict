@@ -322,6 +322,7 @@ function CaptureSection() {
   const [ai, setAi] = useState<AiPrefs | null>(null);
   const [visionModel, setVisionModel] = useState("");
   const [autoRecognize, setAutoRecognize] = useState(false);
+  const [autoTranslate, setAutoTranslate] = useState(false);
   const [loaded, setLoaded] = useState(false);
   // 预览交互态：切换译文/原文按钮可点按体验（不落任何状态）
   const [previewOverlay, setPreviewOverlay] = useState(true);
@@ -334,6 +335,7 @@ function CaptureSection() {
         setAi(p.ai);
         setVisionModel(p.ocrVisionModel || "");
         setAutoRecognize(Boolean(p.ocrAutoRecognize));
+        setAutoTranslate(Boolean(p.ocrAutoTranslate));
         setLoaded(true);
       })
       .catch(() => {});
@@ -344,6 +346,12 @@ function CaptureSection() {
   const saveAutoRecognize = (v: boolean) => {
     setAutoRecognize(v);
     void invoke("prefs_set_ocr_auto_recognize", { value: v }).catch(() => {});
+  };
+
+  /** 识别后自动翻译开关（即改即存；默认 false = 识别后点「译」手动启动） */
+  const saveAutoTranslate = (v: boolean) => {
+    setAutoTranslate(v);
+    void invoke("prefs_set_ocr_auto_translate", { value: v }).catch(() => {});
   };
 
   /** 图译模型可选卡（有端点 + 有模型列表），同全局默认模型下拉的分组样式 */
@@ -387,6 +395,16 @@ function CaptureSection() {
             </SettingDescription>
           </div>
           <Switch checked={autoRecognize} onCheckedChange={saveAutoRecognize} />
+        </SettingRow>
+        <SettingRow className="my-3">
+          <div className="min-w-0 flex-1">
+            <SettingRowTitle>识别后自动翻译</SettingRowTitle>
+            <SettingDescription>
+              开启后识别完成即自动启动逐行翻译（语义同点「译」）；默认关闭，由工具条「译」手动触发。
+              AI 图译兜底完成后仍需手动翻译。
+            </SettingDescription>
+          </div>
+          <Switch checked={autoTranslate} onCheckedChange={saveAutoTranslate} />
         </SettingRow>
         <p className="text-muted-foreground text-xs">
           预览可点按体验按钮行为（不执行实际动作）。自动 = 自动检测源语言并译为中文；

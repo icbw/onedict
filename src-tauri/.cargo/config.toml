@@ -1,0 +1,5 @@
+# 编译配置：关闭增量编译。
+# 取舍：incremental 缓存对单 crate 重复改动的收益有限，但会无限累积
+# （本项目曾累积约 29 GB），磁盘换时间的性价比不划算，故全局关闭。
+[build]
+incremental = false

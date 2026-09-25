@@ -193,6 +193,9 @@ export default function OcrCaptureApp() {
   /** 截图后自动系统识别（偏好快照，唤起时读取； 默认
    *  false = 只截屏钉原位，点 bar「识别文字」手动触发） */
   const [autoRecognize, setAutoRecognize] = useState(false);
+  /** 识别后自动翻译（偏好快照，唤起时读取；默认
+   *  false = 识别后点 bar「译」手动启动翻译） */
+  const [autoTranslate, setAutoTranslate] = useState(false);
   /** 系统 OCR 识别进行中（bar ScanText 按钮转圈；与翻译/AI 流互斥） */
   const [ocrLoading, setOcrLoading] = useState(false);
   /** 翻译卡展开态：默认折叠 = PixPin 式截图 bar（点「翻译」展开并启动；
@@ -291,6 +294,7 @@ export default function OcrCaptureApp() {
         .then((p) => {
           setSourceLang(sourceLangCompat(p.ocrLang));
           setAutoRecognize(Boolean(p.ocrAutoRecognize));
+          setAutoTranslate(Boolean(p.ocrAutoTranslate));
         })
         .catch(() => {});
       // 全屏底图 + 鼠标初始坐标（Rust launch 时已备好；空图 = 放大镜降级隐藏）。
@@ -445,7 +449,8 @@ export default function OcrCaptureApp() {
 
   /** 区域结果统一回填（自动识别 / 工具条手动识别两路共用）：快照
    *  钉原位 + 行级数据 + 空态处理 + 目标语言偏好随识别读取（用户可能在截图间隙
-   *  改了设置）——**不自动翻译**：进 bar 态，点「翻译」手动启动 */
+   *  改了设置）——默认不自动翻译进 bar 态点「译」；开启「识别后自动翻译」时
+   *  回填即启动（见下方 prefs_get 回调） */
   const applyRegionResult = (res: OcrRegionResult) => {
     setSnapshot(res.snapshot);
     setRegion({ x: res.regionX, y: res.regionY, w: res.regionW, h: res.regionH });
@@ -466,6 +471,13 @@ export default function OcrCaptureApp() {
         const d = p.ocrTargetLang || "auto";
         setTargetPref(d);
         setDefaultTarget(d);
+        // 「识别后自动翻译」随回填启动流（语义同点「译」）：目标语言用刚读取
+        // 的偏好默认；行文本用本地 usable——ocrLines state 尚未提交，读 state
+        // 会拿到上一轮旧值。AI 图译兜底不经此处（识别/翻译解耦，完成仍手动「译」）
+        if (autoTranslate && usable.length && !loading) {
+          setShowOverlay(true);
+          startTranslate(usable.map((l) => l.text), d, sourceLang);
+        }
       })
       .catch(() => {});
   };

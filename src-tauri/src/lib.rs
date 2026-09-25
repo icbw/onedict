@@ -234,6 +234,7 @@ pub fn run() {
             prefs::prefs_set_ocr_target_lang,
             prefs::prefs_set_ocr_vision_model,
             prefs::prefs_set_ocr_auto_recognize,
+            prefs::prefs_set_ocr_auto_translate,
             prefs::prefs_set_check_update_on_startup,
             prefs::prefs_set_pronounce,
             ocr::ocr_recognize_region,

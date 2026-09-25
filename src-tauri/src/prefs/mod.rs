@@ -97,6 +97,10 @@ pub struct Preferences {
     /// 工具条「识别文字」按钮手动触发；true = 保留拖框即识别的原行为）
     #[serde(default)]
     pub ocr_auto_recognize: bool,
+    /// 识别后自动翻译（默认 false = 识别后点「译」手动启动；true = 识别
+    /// 回填即按偏好目标语言自动启动逐行翻译，语义同手动「译」）
+    #[serde(default)]
+    pub ocr_auto_translate: bool,
     /// 用户过滤列表（进程名子串匹配，小写存储；仅 whitelist/blacklist 模式消费）
     #[serde(default)]
     pub selection_filter_list: Vec<String>,
@@ -145,6 +149,7 @@ impl Default for Preferences {
             ocr_target_lang: String::new(),
             ocr_vision_model: String::new(),
             ocr_auto_recognize: false,
+            ocr_auto_translate: false,
             web_dicts: None,
         }
     }
@@ -864,6 +869,11 @@ pub fn set_ocr_auto_recognize(value: bool) {
     update(|p| p.ocr_auto_recognize = value);
 }
 
+/// 识别后自动翻译开关（false = 识别后手动「译」）
+pub fn set_ocr_auto_translate(value: bool) {
+    update(|p| p.ocr_auto_translate = value);
+}
+
 /// 发音偏好快照（前端经 prefs_get 读取；Rust 侧暂无消费方——朗读链执行在前端）
 #[allow(dead_code)]
 pub fn pronounce() -> PronouncePrefs {
@@ -948,6 +958,7 @@ pub struct PrefsPayload {
     pub ocr_target_lang: String,
     pub ocr_vision_model: String,
     pub ocr_auto_recognize: bool,
+    pub ocr_auto_translate: bool,
     pub check_update_on_startup: bool,
     pub pronounce: PronouncePrefs,
 }
@@ -987,6 +998,7 @@ pub fn prefs_get() -> Result<PrefsPayload, String> {
         ocr_target_lang: p.ocr_target_lang,
         ocr_vision_model: p.ocr_vision_model,
         ocr_auto_recognize: p.ocr_auto_recognize,
+        ocr_auto_translate: p.ocr_auto_translate,
         check_update_on_startup: p.check_update_on_startup,
         pronounce: p.pronounce,
     })
@@ -1190,6 +1202,12 @@ pub fn prefs_set_ocr_vision_model(value: String) {
 #[tauri::command]
 pub fn prefs_set_ocr_auto_recognize(value: bool) {
     set_ocr_auto_recognize(value);
+}
+
+/// 保存识别后自动翻译开关（设置页即改即存；false = 识别后手动「译」）
+#[tauri::command]
+pub fn prefs_set_ocr_auto_translate(value: bool) {
+    set_ocr_auto_translate(value);
 }
 
 /// 保存词典管理配置（启停 + 顺序；统一列表含在线词典条目 id 前缀 `web-`——

@@ -162,6 +162,9 @@ export interface PrefsPayload {
   /** 截图后自动系统识别：false（默认）= 只截屏钉原位，
    *  工具条「识别文字」按钮手动触发；true = 保留拖框即识别的原行为 */
   ocrAutoRecognize: boolean;
+  /** 识别后自动翻译：false（默认）= 识别后点「译」手动启动；
+   *  true = 识别回填即按偏好目标语言自动启动逐行翻译（AI 图译兜底不受影响） */
+  ocrAutoTranslate: boolean;
   /** 启动时检查更新（默认关；检查动作只在下次启动生效，设置页内仍可手动检查） */
   checkUpdateOnStartup: boolean;
   /** 发音（朗读源链 + 系统语音选择；旧文件缺字段由后端取默认） */
