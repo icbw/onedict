@@ -126,6 +126,14 @@ export default function DictionaryPanel({
   /** 展开其余词典（iframe 上限截断后的手动展开；新查询重置） */
   const [showAllDicts, setShowAllDicts] = useState(false);
   const [soundHint, setSoundHint] = useState<SoundHint | null>(null);
+  /** 释义级收藏结果提示（拖选工具条「收藏此义」；短时自动清除） */
+  const [senseHint, setSenseHint] = useState<string | null>(null);
+  const senseHintTimer = useRef<number | null>(null);
+  const showSenseHint = useCallback((text: string) => {
+    setSenseHint(text);
+    if (senseHintTimer.current !== null) window.clearTimeout(senseHintTimer.current);
+    senseHintTimer.current = window.setTimeout(() => setSenseHint(null), 2600);
+  }, []);
   /** 词典外链走向（偏好 webExternal）：true = 系统浏览器打开（默认），
    *  false = 转词典内部查词（wordFromExternalLink 提取词）。
    *  prefs-changed 广播驱动重读（设置页切换即时生效于主窗与面板） */
@@ -517,6 +525,29 @@ export default function DictionaryPanel({
         const sayText = d.text.trim();
         if (!dictId || !sayText) return;
         void handleFrameSpeak(dictId, d.seq, sayText, d.which === "b" ? "b" : "a");
+      } else if (d?.type === "onedict-selection") {
+        // 帧内拖选（工具条浮出，查询不再自动发生）：压掉全局划词浮标——
+        // 捕获链无自身窗口豁免，拖选帧内文本会弹浮标，原靠 400ms 后的自动查询
+        // 顺带压制，现在须主动报。source 校验同其他消息分支
+        if (findDictId(e.source)) void invoke("selection_hide_toolbar").catch(() => {});
+      } else if (d?.type === "onedict-sense" && typeof d.text === "string") {
+        // 释义级收藏（拖选工具条「收藏此义」）：选中文本 = 释义快照，
+        // 当前查询词 + 来源词典走 vocabulary_add 带 sense——词不存在则创建，
+        // 已存在则更新主词义（最新收藏胜出，M2a 幂等语义）
+        const dictId = findDictId(e.source);
+        const definition = d.text.trim();
+        const target = word.trim();
+        if (!dictId || !definition || !target) return;
+        void invoke<{ created: boolean; updated: boolean }>("vocabulary_add", {
+          word: target,
+          sense: { dictId, definition },
+        })
+          .then((r) => {
+            showSenseHint(
+              r.created ? "已加入生词本（含此义）" : r.updated ? "主词义已更新" : "主词义未变",
+            );
+          })
+          .catch(() => showSenseHint("收藏失败"));
       } else if (d?.type === "onedict-sound-error" && typeof d.msg === "string") {
         // 帧内起播失败（自动播放被拒 / 音频管线停滞）→ 上屏提示（此前静默丢弃，
         // 表现为「点了没声音也没反应」，无从判断）
@@ -539,7 +570,7 @@ export default function DictionaryPanel({
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [onWordChange, reportSound, webExternal, handleFrameAudio, handleFrameSpeak]);
+  }, [onWordChange, reportSound, webExternal, handleFrameAudio, handleFrameSpeak, word, showSenseHint]);
 
   /** 栏头点击：当前折叠态 = 手动 ∪ miss 自动。展开 = 双集合移出（对 miss
    *  自动折叠的手动展开视为「想看」，下一轮它再 miss 会重新自动折叠）；
@@ -793,12 +824,17 @@ export default function DictionaryPanel({
 
   return (
     <div className={cn("relative flex flex-col", variant === "card" ? "gap-3" : "gap-2")}>
-      {(pendingLabel || internalSoundHint) && (
+      {(pendingLabel || internalSoundHint || senseHint) && (
         <div className="pointer-events-none absolute top-0 right-0 z-10 flex flex-col items-end gap-1">
           {pendingLabel && (
             <div className="flex items-center gap-1 rounded-full border border-border bg-muted/90 px-2 py-0.5 text-muted-foreground text-xs shadow-sm">
               <Loader2 className="size-3 animate-spin" />
               {pendingLabel}
+            </div>
+          )}
+          {senseHint && (
+            <div className="flex items-center gap-1 rounded-full border border-green-600/30 bg-muted/90 px-2 py-0.5 text-green-700 text-xs shadow-sm">
+              {senseHint}
             </div>
           )}
           {internalSoundHint && (

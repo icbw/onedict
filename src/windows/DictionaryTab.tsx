@@ -22,6 +22,7 @@ import { useWordNav } from "../lib/wordNav";
 import { initSpxDecoder } from "../services/spxDecoder";
 import speexCode from "../vendor/speex/speex.min.js?raw";
 import type { HistoryEntry } from "../types/history";
+import type { EntryContext } from "../types/vocabulary";
 import DictionaryPanel, { type SoundHint } from "./panel/DictionaryPanel";
 
 export default function DictionaryTab({
@@ -213,10 +214,17 @@ export default function DictionaryTab({
     [showHint, clearHint],
   );
 
-  // 幂等加词（vocabulary.add 语义：已存在返回已有条目 created=false）
+  // 幂等加词（词典页手动收藏：manual 来源，无划词语境——语境捕获在划词面板侧）
   const addToVocabulary = () => {
     if (!word) return;
-    invoke<{ entry: unknown; created: boolean }>("vocabulary_add", { word })
+    const context: EntryContext = {
+      sentence: "",
+      wordOffset: null,
+      sourceApp: null,
+      kind: "manual",
+      capturedAt: Date.now(),
+    };
+    invoke<{ entry: unknown; created: boolean }>("vocabulary_add", { word, context })
       .then((r) => {
         setInVocabulary(true);
         showHint(r.created ? "已加入生词本" : "已在生词本中", "success");

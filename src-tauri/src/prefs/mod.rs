@@ -495,6 +495,9 @@ pub struct PronouncePrefs {
     pub rate: f32,
     /// 词条无发音资源时自动回退合成语音（合成文本取锚点附近内容，见前端帧脚本）
     pub fallback_missing: bool,
+    /// 复习语音预取（M3 配套，默认关）：今日计划的词与语境句后台批量合成
+    /// 落 voice-cache（串行低并发、失败静默；复习链未命中仍实时合成兜底）
+    pub voice_prefetch: bool,
 }
 
 impl Default for PronouncePrefs {
@@ -508,6 +511,7 @@ impl Default for PronouncePrefs {
             en_accent: String::new(),
             rate: 1.0,
             fallback_missing: true,
+            voice_prefetch: false,
         }
     }
 }
@@ -1608,6 +1612,7 @@ mod tests {
             en_accent: " GB ".into(),
             rate: 9.0,
             fallback_missing: true,
+            voice_prefetch: false,
         };
         let n = normalize_pronounce(raw);
         assert_eq!(n.voice_slots.len(), 6, "槽位恒满：非法槽键被丢弃后由默认补齐");

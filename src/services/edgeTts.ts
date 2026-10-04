@@ -6,6 +6,12 @@
  * 语音列表 HTTP 一次拉取（会话内缓存），合成走 WSS（首块约 300ms，边合成边返回）。
  *
  * 需联网；接口非官方，失败给出 `EDGE_TTS:` 前缀错误，由朗读链降级到下一源。
+ *
+ * `synthesizeEdge` 是合成**唯一出口**，内联 write-through 磁盘缓存（M3）：命中
+ * `voice-cache\`（Rust 侧按 (text, voice, rate) SHA-256 键管理，LRU 容量上限）
+ * 本地秒放；未命中现合成后落盘。例句点击二次起免在线合成；分句流水
+ * （speakEdgeQueued）逐句走同一出口，每句独立缓存。缓存读写失败静默降级为
+ * 直接合成（缓存是加速器，不是依赖）。
  */
 import { invoke } from "@tauri-apps/api/core";
 import { detectLang, speakQueuedWith, type SoundData } from "./tts";
@@ -34,11 +40,35 @@ export async function synthesizeEdge(
   voice: string,
   rate?: number,
 ): Promise<SoundData> {
-  return invoke<SoundData>("edge_tts_synthesize", {
-    text,
+  const target = text.trim();
+  if (!target) throw new Error("EDGE_TTS_EMPTY:文本为空");
+  const normRate = rate ?? 1.0;
+  // 命中即回（缓存读失败按未命中处理）
+  try {
+    const hit = await invoke<SoundData | null>("voice_cache_get", {
+      text: target,
+      voice,
+      rate: normRate,
+    });
+    if (hit?.base64) return hit;
+  } catch {
+    /* 缓存不可用 → 直接合成 */
+  }
+  const data = await invoke<SoundData>("edge_tts_synthesize", {
+    text: target,
     voice,
-    rate: rate ?? null,
+    rate: normRate,
   });
+  // 落盘 fire-and-forget：失败不影响本次播放
+  if (data.base64) {
+    void invoke("voice_cache_put", {
+      text: target,
+      voice,
+      rate: normRate,
+      base64: data.base64,
+    }).catch(() => {});
+  }
+  return data;
 }
 
 /** 按语言挑在线语音（指定优先；否则同 locale 前缀第一个；都没有给 undefined） */

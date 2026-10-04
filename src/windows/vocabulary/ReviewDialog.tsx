@@ -2,11 +2,15 @@
  * 学习卡复习弹窗（生词本重构）。
  * 溯源：复习调度（applySm2）与释义渲染（dictFrame）沿用自 pickdict (MIT) 的移植；
  * 弹窗与翻牌形态为本仓重构（原 ReviewTab 已删）。
- * 3D 翻牌卡：正面 = 单词大字（点击/Space 翻面），背面 = 第一部启用词典释义
- * （iframe 沙箱渲染，同 ReviewTab 翻面管线）。四档 SM-2 评分（Space 已翻面时 =
- * 良好），「重来」回队尾重学；←→ 浏览切卡（浏览不评分）；顶部进度条 + n/m。
- * 会话队列由父组件按范围组装（全部到期 / 单元到期，dueAt 升序）后经 session 传入，
- * 打开时重置会话并缓存启用词典列表（翻面免重复拉取）。
+ * 3D 翻牌卡：正面按语境分流（M3）——有语境 = 原句挖空（词形替换 ___，
+ * UTF-16 偏移切片，lib/vocabContext 纯函数）+ 读整句按钮（语境记忆优先，
+ * 自动发音仍只读词头——句子自动读会盖住回忆思考）；无语境 = 单词大字
+ * （零破坏降级）。背面 = 语境义置顶卡（sense 快照 + 来源词典 id + 原句高亮
+ * 词形对照，词典移除后快照仍显示）+ 第一部启用词典释义（iframe 沙箱渲染）。
+ * 四档 SM-2 评分（Space 已翻面时 = 良好），「重来」回队尾重学；←→ 浏览切卡
+ * （浏览不评分）；顶部进度条 + n/m。会话队列由父组件按范围组装（全部到期 /
+ * 单元到期，dueAt 升序）后经 session 传入，打开时重置会话并缓存启用词典列表
+ * （翻面免重复拉取）。
  *
  * 发音（追加）：
  * - 背面修复：BOOT_SCRIPT 点 sound:// 回传 `onedict-sound`，本组件此前未监听
@@ -21,6 +25,9 @@
  *   keep-alive 常驻监听）。
  * - 自动发音：偏好 `reviewAutoPronounce`（设置页词典子页开关，prefs-changed 实时
  *   跟随）开启时卡片出现自动读词；无用户手势的自动播放被 WebView2 拦截时降级提示。
+ * - 例句朗读（追加）：背面帧 `say: true`——帧内例句按钮回传 `onedict-speak`，父页按
+ *   句子链（Edge 在线 → 本地系统语音）合成播放。例句朗读保持手动点击：句子自动读
+ *   会盖住用户回忆词义的思考过程（自动发音只管词头）。
  */
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -40,11 +47,14 @@ import {
   DialogTitle,
 } from "@onedict/ui/components/dialog";
 import { cn } from "../../lib/utils";
+import { maskSentence, sentenceHighlight } from "../../lib/vocabContext";
 import { applySm2, type ReviewGrade } from "../../services/sm2";
 import { buildSrcdoc } from "../../services/dictFrame";
 import { fetchSoundData } from "../../services/dictSound";
 import { playSoundData, stopSpeaking } from "../../services/tts";
-import { firstSoundKey, speakWord } from "../../services/pronounce";
+import { firstSoundKey, speakSentence, speakWord } from "../../services/pronounce";
+import { prefetchVoiceAudio } from "../../services/voicePrefetch";
+import { sayButtonsOf } from "../../services/voiceRouter";
 import type { DictMeta, LookupResult } from "../../types/dictionary";
 import type { PrefsPayload, PronouncePrefs } from "../../types/prefs";
 import type { VocabularyEntry } from "../../types/vocabulary";
@@ -198,6 +208,14 @@ export default function ReviewDialog({
   const done = index >= queue.length;
   const progress = queue.length === 0 ? 100 : (Math.min(index, queue.length) / queue.length) * 100;
 
+  // 会话级语音预取（M3，设置页开关默认关）：会话选词的词 + 语境句后台合成落
+  // voice-cache——马上要复习的卡片最直接的加速点。pronounce 异步就绪后随 deps
+  // 补触发（session 已开时也不漏）
+  useEffect(() => {
+    if (!session || !pronounce) return;
+    prefetchVoiceAudio(session.queue, pronounce);
+  }, [session, pronounce]);
+
   // 完成回调：队列清空即汇总一次（父组件提交轮次 / 抽查记录；专项练习不落记录）
   useEffect(() => {
     if (!open || !done || !session || completedRef.current) return;
@@ -273,6 +291,28 @@ export default function ReviewDialog({
     }
   };
 
+  // 语境卡正面发音：读整句（speakSentence 句子链 edge → tts；语境记忆优先），
+  // 而非读词——正面挖空要回忆的就是词形，读词等于泄底。无语境回落读词（speak）。
+  // 自动发音偏好仍只管词头（M1 决策：句子自动读会盖住回忆思考）。
+  const speakContext = async () => {
+    const card = queue[index];
+    const sentence = card?.context?.sentence?.trim();
+    if (!sentence) {
+      void speak();
+      return;
+    }
+    const prefs = pronounce;
+    if (!prefs) {
+      setSoundHint("发音配置尚未就绪，请稍候再试");
+      return;
+    }
+    try {
+      await speakSentence(sentence, prefs, (h) => setSoundHint(h?.text ?? null));
+    } catch (err) {
+      setSoundHint(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   // 自动发音：卡片出现（含浏览切卡、「重来」回队尾重现）即读词；
   // 必须等词典缓存就绪——打开会话首张卡的 current.id 变化早于 dictionary_list 返回，
   // 不加 dictsReady 会静默错过首张（实测）
@@ -338,27 +378,45 @@ export default function ReviewDialog({
   };
 
   // 背面发音：iframe 内点 sound:// → BOOT_SCRIPT 回传 onedict-sound → 此处取字节
-  // 直接父页播放（此前未监听该消息 = 「发音按钮没反应」的根因）
+  // 直接父页播放（此前未监听该消息 = 「发音按钮没反应」的根因）。
+  // 背面例句朗读：帧内例句按钮回传 onedict-speak → 句子链（Edge 在线 → 本地系统语音）
+  // 父页合成播放——复习卡查词走第一部启用词典，例句无词典录音，合成朗读是唯一
+  // 发音来源（依赖 pronounce 就绪；deps 随动，否则闭包读到旧 null）。
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
-      const d = e.data as { type?: string; key?: string } | null;
-      if (d?.type !== "onedict-sound" || typeof d.key !== "string" || !d.key) return;
+      const d = e.data as { type?: string; key?: string; text?: string; which?: string } | null;
+      if (!d || typeof d.type !== "string") return;
       if (iframeRef.current && e.source !== iframeRef.current.contentWindow) return;
-      const dictId = dictsRef.current[0]?.id;
-      if (!dictId) return;
-      setSoundHint("发音获取中…");
-      fetchSoundData(dictId, d.key)
-        .then((data) => {
-          setSoundHint(null);
-          playBase64(data.mime, data.base64);
-        })
-        .catch((err) => {
+      if (d.type === "onedict-sound") {
+        if (typeof d.key !== "string" || !d.key) return;
+        const dictId = dictsRef.current[0]?.id;
+        if (!dictId) return;
+        setSoundHint("发音获取中…");
+        fetchSoundData(dictId, d.key)
+          .then((data) => {
+            setSoundHint(null);
+            playBase64(data.mime, data.base64);
+          })
+          .catch((err) => {
+            setSoundHint(err instanceof Error ? err.message : String(err));
+          });
+      } else if (d.type === "onedict-speak") {
+        const sayText = typeof d.text === "string" ? d.text.trim() : "";
+        if (!sayText || !pronounce) return;
+        const button = sayButtonsOf(pronounce)[d.which === "b" ? 1 : 0];
+        void speakSentence(
+          sayText,
+          pronounce,
+          (h) => setSoundHint(h?.text ?? null),
+          button,
+        ).catch((err) => {
           setSoundHint(err instanceof Error ? err.message : String(err));
         });
+      }
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, []);
+  }, [pronounce]);
 
   // 键盘：Space 翻面/良好、1-4 评分（翻面后）、←→ 浏览；Esc 关闭由 Dialog 自带
   useEffect(() => {
@@ -462,7 +520,7 @@ export default function ReviewDialog({
                     revealed && "[transform:rotateY(180deg)]",
                   )}
                 >
-                  {/* 正面：单词 + 发音 */}
+                  {/* 正面：语境挖空（有语境）/ 单词大字（无语境，零破坏降级） */}
                   <div
                     role="button"
                     tabIndex={0}
@@ -475,50 +533,120 @@ export default function ReviewDialog({
                       revealed ? "pointer-events-none" : "cursor-pointer select-text",
                     )}
                   >
-                    <div className="max-w-full px-10 text-center break-words font-semibold text-foreground text-4xl">
-                      {current.word}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Tooltip content="发音" placement="bottom">
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="icon-sm"
-                          aria-label="发音"
-                          onClick={(e) => {
-                            e.stopPropagation(); // 不触发翻面
-                            void speak();
-                          }}
-                        >
-                          <Volume2 className="size-4" />
-                        </Button>
-                      </Tooltip>
-                      <span className="text-muted-foreground text-xs">
-                        按 Space 或点击卡片显示释义
-                      </span>
-                    </div>
+                    {current.context?.sentence ? (
+                      <>
+                        <div className="max-h-40 max-w-full overflow-y-auto px-10 text-center align-middle text-xl leading-relaxed break-words font-medium text-foreground">
+                          {maskSentence(current.context.sentence, current.context.wordOffset)}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Tooltip content="读整句" placement="bottom">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="icon-sm"
+                              aria-label="读整句"
+                              onClick={(e) => {
+                                e.stopPropagation(); // 不触发翻面
+                                void speakContext();
+                              }}
+                            >
+                              <Volume2 className="size-4" />
+                            </Button>
+                          </Tooltip>
+                          <span className="text-muted-foreground text-xs">
+                            回忆句中这个词，按 Space 翻面对答案
+                          </span>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="max-w-full px-10 text-center break-words font-semibold text-foreground text-4xl">
+                          {current.word}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Tooltip content="发音" placement="bottom">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="icon-sm"
+                              aria-label="发音"
+                              onClick={(e) => {
+                                e.stopPropagation(); // 不触发翻面
+                                void speak();
+                              }}
+                            >
+                              <Volume2 className="size-4" />
+                            </Button>
+                          </Tooltip>
+                          <span className="text-muted-foreground text-xs">
+                            按 Space 或点击卡片显示释义
+                          </span>
+                        </div>
+                      </>
+                    )}
                   </div>
 
-                  {/* 背面：释义（iframe 沙箱，白底；帧内发音按钮经 onedict-sound 消息播放） */}
-                  <div className="absolute inset-0 overflow-hidden rounded-2xl border border-border bg-white [backface-visibility:hidden] [transform:rotateY(180deg)]">
-                    {html ? (
-                      <iframe
-                        ref={iframeRef}
-                        title={`review-card-${current.id}`}
-                        sandbox="allow-scripts"
-                        // allow="autoplay"：卡面发音在帧内 new Audio(...).play()，沙箱帧
-                        // 是 opaque origin ⇒ 缺这条会被权限策略拒（NotAllowedError）
-                        allow="autoplay"
-                        // say:false —— 复习卡帧只听 onedict-sound，不接 onedict-speak：
-                        // 注入例句朗读按钮只会是「点了没反应」的哑按钮
-                        srcDoc={buildSrcdoc(html, undefined, { say: false })}
-                        className="block h-full w-full border-0 bg-white"
-                      />
-                    ) : (
-                      <div className="flex h-full items-center justify-center text-foreground-tertiary text-sm">
-                        该词未被词典收录
+                  {/* 背面：语境义置顶卡（sense 快照 + 原句高亮词形对照）+ 释义帧
+                      （iframe 沙箱，白底；帧内发音按钮经 onedict-sound 消息播放） */}
+                  <div className="absolute inset-0 flex flex-col overflow-hidden rounded-2xl border border-border bg-white [backface-visibility:hidden] [transform:rotateY(180deg)]">
+                    {(current.sense || current.context?.sentence) && (
+                      <div className="flex shrink-0 flex-col gap-1 border-b border-border-subtle px-4 py-2.5 text-left">
+                        {current.sense && (
+                          <div className="flex items-baseline gap-2">
+                            <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 font-medium text-[10px] text-primary">
+                              语境义 · {current.sense.dictId}
+                            </span>
+                            <span className="line-clamp-3 min-w-0 flex-1 text-sm leading-snug">
+                              {current.sense.definition}
+                            </span>
+                          </div>
+                        )}
+                        {current.context?.sentence &&
+                          (() => {
+                            const hl = sentenceHighlight(
+                              current.context.sentence,
+                              current.context.wordOffset,
+                            );
+                            return (
+                              <p className="text-muted-foreground text-xs leading-relaxed break-words">
+                                {hl ? (
+                                  <>
+                                    {hl.before}
+                                    <span className="rounded bg-amber-500/25 px-0.5 font-medium text-foreground">
+                                      {hl.hit}
+                                    </span>
+                                    {hl.after}
+                                  </>
+                                ) : (
+                                  current.context.sentence
+                                )}
+                              </p>
+                            );
+                          })()}
                       </div>
                     )}
+                    <div className="min-h-0 flex-1">
+                      {html ? (
+                        <iframe
+                          ref={iframeRef}
+                          title={`review-card-${current.id}`}
+                          sandbox="allow-scripts"
+                          // allow="autoplay"：卡面发音在帧内 new Audio(...).play()，沙箱帧
+                          // 是 opaque origin ⇒ 缺这条会被权限策略拒（NotAllowedError）
+                          allow="autoplay"
+                          // say:true —— 帧内例句朗读按钮经 onedict-speak 回传，父页按
+                          // 句子链（Edge 在线 → 本地系统语音）合成播放（上方 message 监听）
+                          // sense:false —— 宿主不接 onedict-sense，拖选不浮收藏工具条
+                          //（卡面语义是回忆不是收藏；同 onedict-word 一样被 source 校验拒收）
+                          srcDoc={buildSrcdoc(html, undefined, { say: true, sense: false })}
+                          className="block h-full w-full border-0 bg-white"
+                        />
+                      ) : (
+                        <div className="flex h-full items-center justify-center text-foreground-tertiary text-sm">
+                          该词未被词典收录
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>

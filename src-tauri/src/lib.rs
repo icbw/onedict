@@ -15,6 +15,7 @@ mod tray;
 mod tts;
 mod unitlog;
 mod update;
+mod voice_cache;
 mod vocabulary;
 mod webdict;
 
@@ -203,6 +204,7 @@ pub fn run() {
             history::translate::translate_history_add,
             history::translate::translate_history_clear,
             selection::selection_open_panel,
+            selection::expand::selection_expand_context,
             selection::selection_set_panel_pinned,
             selection::selection_hide_panel,
             selection::selection_hide_toolbar,
@@ -251,6 +253,9 @@ pub fn run() {
             webdict::webdict_clear_cache,
             edge_tts::edge_tts_voices,
             edge_tts::edge_tts_synthesize,
+            voice_cache::voice_cache_get,
+            voice_cache::voice_cache_put,
+            voice_cache::voice_cache_remove,
             tts::tts_voices,
             tts::tts_synthesize,
             data::data_backup,

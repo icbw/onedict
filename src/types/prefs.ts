@@ -107,6 +107,9 @@ export interface PronouncePrefs {
   rate: number;
   /** 词条无发音资源时自动回退系统语音 */
   fallbackMissing: boolean;
+  /** 复习语音预取（M3 配套，默认关）：今日计划的词与语境句后台批量合成
+   *  落 voice-cache（串行低并发、失败静默；复习链未命中仍实时合成兜底） */
+  voicePrefetch: boolean;
 }
 
 export interface PrefsPayload {

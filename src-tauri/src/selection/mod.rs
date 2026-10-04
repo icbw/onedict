@@ -8,6 +8,7 @@
 pub mod capture;
 pub mod clipmon;
 pub mod clipboard;
+pub mod expand;
 pub mod filter;
 pub mod hook;
 pub mod layout;
@@ -102,6 +103,26 @@ pub struct TriggerInfo {
 
 pub use layout::Point;
 
+/// 最近一次成功捕获的定位信息（懒扩句重导航依据；写方 = capture worker
+/// 尾部落盘，读方 = 收藏时 selection_expand_context 冷路径）
+#[derive(Clone)]
+pub struct CaptureAnchor {
+    /// 捕获时源应用前台窗口句柄（HWND as isize；0 = 未知）。扩句按句柄直达——
+    /// 不用屏幕坐标：收藏时动作面板已盖住选区，ElementFromPoint 命中的是自家
+    /// WebView2（首查还触发 Chromium 无障碍惰性初始化实测 ~2.5s），读不到源应用
+    pub source_hwnd: isize,
+    /// 选区文本（与面板收藏词一致性校验：OCR 经 open_panel_with_text 显式传词
+    /// 不更新锚点，此时锚点陈旧——不匹配即放弃，绝不给旧语境）
+    pub text: String,
+    /// "uia" | "clipboard" | "clipmon"（非 uia 无可重导航的 TextPattern）
+    pub mode: &'static str,
+    pub source_app: Option<String>,
+    pub captured_at: i64,
+    /// 捕获时刻的后台预扩句结果（源应用前台、选区存活时预取；面板出现并抢焦点
+    /// 后 GetSelection 会报空——Word 实测，故语境必须在捕获时趁前台拿到）
+    pub pre_expanded: Option<expand::PreExpanded>,
+}
+
 /// 钩子回调读取的共享状态（浮标物理 bounds + 可见性）。
 /// 写方：capture worker；读方：hook 回调（短临界区）。
 pub struct SharedState {
@@ -109,6 +130,8 @@ pub struct SharedState {
     pub toolbar_visible: bool,
     /// 最近一次成功捕获的文本（动作面板取词来源）
     pub last_text: String,
+    /// 懒扩句锚点（None = 本次会话尚未成功捕获）
+    pub capture_anchor: Option<CaptureAnchor>,
     /// 动作面板 pin 常驻（pinned 时不随失焦隐藏）
     pub panel_pinned: bool,
     /// 动作隐藏后的短暂抑制窗（动作点击的 mouse up 可能晚于 hide
@@ -123,6 +146,7 @@ pub static SHARED: Mutex<SharedState> = Mutex::new(SharedState {
     toolbar: None,
     toolbar_visible: false,
     last_text: String::new(),
+    capture_anchor: None,
     panel_pinned: false,
     suppress_until: None,
     notice: None,

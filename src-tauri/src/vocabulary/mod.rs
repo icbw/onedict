@@ -36,6 +36,49 @@ fn default_unit_id() -> String {
     INBOX_UNIT_ID.to_string()
 }
 
+/// 语境句长上限（字符数；超长截断防单条爆体积——截断发生在入存储前，
+/// 收词箱语境句在复习卡与备份中长期驻留）
+const CONTEXT_SENTENCE_MAX_CHARS: usize = 500;
+
+/// 收词语境（查词场景记忆）。sentence 为空 = 降级态（仅来源元数据）。
+/// wordOffset = 选区词在句中的偏移，单位 UTF-16 code unit（JS 字符串天然索引，
+/// 前端 slice 直接可用；在 Rust 侧按 encode_utf16 计算，不存字节偏移）。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryContext {
+    /// 原句，词形保持原样——遇到的词形本身就是记忆对象
+    #[serde(default)]
+    pub sentence: String,
+    /// [start, end) 偏移；None = 句中未定位到选区词（截断 / 跨句边界）
+    #[serde(default)]
+    pub word_offset: Option<[u32; 2]>,
+    #[serde(default)]
+    pub source_app: Option<String>,
+    /// selection / clipboard / manual（ocr 预留）
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub captured_at: i64,
+}
+
+/// 主复习词义（释义级收藏）：释义文本快照，词典文件更新不失效
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EntrySense {
+    /// 来源词典（展示用；词典移除后兜底显示 id）
+    pub dict_id: String,
+    pub definition: String,
+}
+
+/// 语境入库清理：句超长截断（char boundary 安全）；截断后偏移越界即丢弃
+fn sanitize_context(mut ctx: EntryContext) -> EntryContext {
+    if ctx.sentence.chars().count() > CONTEXT_SENTENCE_MAX_CHARS {
+        ctx.sentence = ctx.sentence.chars().take(CONTEXT_SENTENCE_MAX_CHARS).collect();
+        ctx.word_offset = None; // 截断窗口不保证仍含选区词
+    }
+    ctx
+}
+
 /// 与 pickdict IPC schema / vocabulary.json 逐字段一致（camelCase）
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -61,6 +104,12 @@ pub struct VocabularyEntry {
     /// 最近一次评分（不确定词判定 = again/hard 或 lapses 偏高；serde default 兼容旧文件）
     #[serde(default)]
     pub last_grade: Option<String>,
+    /// 收词语境（旧文件 / 纯词头收藏 = None）
+    #[serde(default)]
+    pub context: Option<EntryContext>,
+    /// 主复习词义（无释义收藏 = None，复习回落通用义）
+    #[serde(default)]
+    pub sense: Option<EntrySense>,
 }
 
 /// 单元容量默认值（新建 / 自动分组未显式指定时的生词上限）
@@ -207,6 +256,9 @@ pub struct ScheduleUpdate {
 pub struct AddResult {
     pub entry: VocabularyEntry,
     pub created: bool,
+    /// 已存在但补填了语境 / 更新了主词义（created=false 时的更新信号，
+    /// 前端据此区分「已在生词本」与「已补充语境」提示）
+    pub updated: bool,
 }
 
 /// JS `word.trim().replace(/\s+/g, ' ')` 等价实现（trim + 空白序列折叠为单空格）。
@@ -284,15 +336,44 @@ impl VocabState {
         self.entries.iter().any(|e| e.norm_key == key)
     }
 
-    /// 幂等添加：同 normKey 已存在 → 返回已有条目 created=false；空词报错
-    fn add(&mut self, raw_word: &str, now: i64) -> Result<(VocabularyEntry, bool), String> {
+    /// 幂等添加（带语境 / 主词义）：
+    /// 不存在 → 创建（挂 context / sense）；
+    /// 已存在 → context 为 None 时补填（重查 = 没记住，语境仍有增量价值），
+    /// 已有 context 不覆盖（多语境追加不支持）；sense 传入即更新（最新收藏胜出）。
+    /// 空词报错。
+    fn add(
+        &mut self,
+        raw_word: &str,
+        now: i64,
+        context: Option<EntryContext>,
+        sense: Option<EntrySense>,
+    ) -> Result<(VocabularyEntry, bool, bool), String> {
         let word = normalize_word(raw_word);
         if word.is_empty() {
             return Err("empty word".into());
         }
         let key = word.to_lowercase();
-        if let Some(existing) = self.entries.iter().find(|e| e.norm_key == key) {
-            return Ok((existing.clone(), false));
+        let context = context.map(sanitize_context);
+        if let Some(existing) = self.entries.iter_mut().find(|e| e.norm_key == key) {
+            let mut updated = false;
+            if existing.context.is_none() {
+                if let Some(ctx) = context {
+                    existing.context = Some(ctx);
+                    updated = true;
+                }
+            }
+            if let Some(sense) = sense {
+                if existing.sense.as_ref() != Some(&sense) {
+                    existing.sense = Some(sense);
+                    updated = true;
+                }
+            }
+            // clone 终结 existing 借用后再落盘（persist 借 &self）
+            let entry = existing.clone();
+            if updated {
+                self.persist();
+            }
+            return Ok((entry, false, updated));
         }
         let entry = VocabularyEntry {
             id: uuid::Uuid::new_v4().to_string(),
@@ -309,10 +390,12 @@ impl VocabState {
             review_count: 0,
             lapses: 0,
             last_grade: None,
+            context,
+            sense,
         };
         self.entries.push(entry.clone());
         self.persist();
-        Ok((entry, true))
+        Ok((entry, true, false))
     }
 
     /// id 不存在 → 静默返回 false（pickdict remove 语义）
@@ -598,10 +681,16 @@ impl VocabularyStore {
         self.with(|s| s.has(word))
     }
 
-    pub fn add(&self, word: &str, now: i64) -> Result<AddResult, String> {
+    pub fn add(
+        &self,
+        word: &str,
+        now: i64,
+        context: Option<EntryContext>,
+        sense: Option<EntrySense>,
+    ) -> Result<AddResult, String> {
         self.with(|s| {
-            let (entry, created) = s.add(word, now)?;
-            Ok(AddResult { entry, created })
+            let (entry, created, updated) = s.add(word, now, context, sense)?;
+            Ok(AddResult { entry, created, updated })
         })?
     }
 
@@ -682,8 +771,10 @@ pub fn vocabulary_add(
     store: tauri::State<'_, VocabularyStore>,
     app: tauri::AppHandle,
     word: String,
+    context: Option<EntryContext>,
+    sense: Option<EntrySense>,
 ) -> Result<AddResult, String> {
-    let result = store.add(&word, now_ms())?;
+    let result = store.add(&word, now_ms(), context, sense)?;
     broadcast_change(&app);
     Ok(result)
 }
@@ -922,27 +1013,98 @@ mod tests {
         let store = VocabularyStore::open(&dir);
         let now = 1_000;
 
-        let first = store.add("Hello", now).unwrap();
+        let first = store.add("Hello", now, None, None).unwrap();
         assert!(first.created);
+        assert!(!first.updated);
         let first = first.entry;
         assert_eq!(first.word, "Hello");
         assert_eq!(first.norm_key, "hello");
+        assert!(first.context.is_none(), "纯词头收藏无语境");
 
         // 空白/大小写归一化后命中同条目 → 返回已有条目 created=false
-        let again = store.add("  hello  ", now + 5).unwrap();
+        let again = store.add("  hello  ", now + 5, None, None).unwrap();
         assert!(!again.created);
         assert_eq!(again.entry.id, first.id);
         assert_eq!(again.entry.added_at, now, "幂等命中不更新原条目");
 
         // 空词报错
-        assert!(store.add("   ", now).is_err());
+        assert!(store.add("   ", now, None, None).is_err());
+    }
+
+    fn sample_context() -> EntryContext {
+        EntryContext {
+            sentence: "The quick brown fox jumps.".into(),
+            word_offset: Some([4, 9]),
+            source_app: Some("chrome.exe".into()),
+            kind: "selection".into(),
+            captured_at: 123,
+        }
+    }
+
+    #[test]
+    fn add_with_context_fills_but_never_overwrites() {
+        let dir = temp_dir("context");
+        let store = VocabularyStore::open(&dir);
+        let now = 1_000;
+
+        // 新建即带语境与主词义
+        let ctx = sample_context();
+        let sense = EntrySense { dict_id: "d1".into(), definition: "adj. 快的".into() };
+        let r = store.add("quick", now, Some(ctx.clone()), Some(sense.clone())).unwrap();
+        assert!(r.created);
+        assert_eq!(r.entry.context.as_ref(), Some(&ctx));
+        assert_eq!(r.entry.sense.as_ref(), Some(&sense));
+
+        // 已存在且已有语境 → 不覆盖（多语境追加不支持）
+        let other = EntryContext { sentence: "其他句子".into(), ..Default::default() };
+        let r = store.add("QUICK", now, Some(other), None).unwrap();
+        assert!(!r.created && !r.updated);
+        assert_eq!(r.entry.context.as_ref(), Some(&ctx), "已有语境不被覆盖");
+
+        // sense 传入即更新（最新收藏胜出）
+        let new_sense = EntrySense { dict_id: "d2".into(), definition: "adj. 迅速的".into() };
+        let r = store
+            .add("quick", now, None, Some(new_sense.clone()))
+            .unwrap();
+        assert!(!r.created && r.updated);
+        assert_eq!(r.entry.sense.as_ref(), Some(&new_sense));
+
+        // 语境补填：纯词头旧词遇到语境 → 补填 + updated
+        store.add("bare", now, None, None).unwrap();
+        let r = store.add("bare", now, Some(ctx.clone()), None).unwrap();
+        assert!(!r.created && r.updated);
+        assert_eq!(r.entry.context.as_ref(), Some(&ctx));
+
+        // 重启后语境仍在（roundtrip）
+        let store = VocabularyStore::open(&dir);
+        let entry = store.list().unwrap().into_iter().find(|e| e.word == "quick").unwrap();
+        assert_eq!(entry.context.as_ref(), Some(&ctx));
+        assert_eq!(entry.sense.as_ref(), Some(&new_sense));
+    }
+
+    #[test]
+    fn context_sentence_truncates_to_limit() {
+        // 截断到上限；截断后偏移越界即丢弃
+        let long: String = "词".repeat(CONTEXT_SENTENCE_MAX_CHARS + 50);
+        let ctx = EntryContext {
+            sentence: long.clone(),
+            word_offset: Some([0, 1]),
+            ..Default::default()
+        };
+        let sanitized = sanitize_context(ctx);
+        assert_eq!(sanitized.sentence.chars().count(), CONTEXT_SENTENCE_MAX_CHARS);
+        assert!(sanitized.word_offset.is_none(), "截断后偏移丢弃");
+
+        // 未超长 → 偏移保留
+        let ctx = EntryContext { sentence: "正常句子".into(), word_offset: Some([2, 4]), ..Default::default() };
+        assert_eq!(sanitize_context(ctx).word_offset, Some([2, 4]));
     }
 
     #[test]
     fn remove_missing_is_silent() {
         let dir = temp_dir("remove");
         let store = VocabularyStore::open(&dir);
-        let entry = store.add("word", 1).unwrap().entry;
+        let entry = store.add("word", 1, None, None).unwrap().entry;
 
         store.remove("no-such-id").unwrap(); // 不存在：静默无错误
         assert_eq!(store.list().unwrap().len(), 1);
@@ -955,7 +1117,7 @@ mod tests {
     fn review_merges_schedule_and_bumps_count() {
         let dir = temp_dir("review");
         let store = VocabularyStore::open(&dir);
-        let entry = store.add("word", 1).unwrap().entry;
+        let entry = store.add("word", 1, None, None).unwrap().entry;
 
         let next = ScheduleUpdate {
             ease_factor: 2.6,
@@ -1002,7 +1164,7 @@ mod tests {
         let now = 1_000;
         let entry = {
             let store = VocabularyStore::open(&dir);
-            let r = store.add("días", now).unwrap();
+            let r = store.add("días", now, None, None).unwrap();
             assert_eq!(r.entry.norm_key, "días"); // Unicode to_lowercase
             r.entry
         };
@@ -1019,7 +1181,7 @@ mod tests {
         for field in [
             "\"normKey\"", "\"addedAt\"", "\"easeFactor\"", "\"intervalDays\"",
             "\"repetitions\"", "\"dueAt\"", "\"lastReviewedAt\"", "\"reviewCount\"", "\"lapses\"",
-            "\"unitId\"", "\"lastGrade\"",
+            "\"unitId\"", "\"lastGrade\"", "\"context\"", "\"sense\"",
         ] {
             assert!(text.contains(field), "缺少字段 {field}");
         }
@@ -1036,7 +1198,7 @@ mod tests {
         assert_eq!(unit.name, "Unit 1", "名称 trim");
         assert!(store.unit_create("   ", 100, &opts).is_err(), "空名报错");
 
-        let entry = store.add("word", 100).unwrap().entry;
+        let entry = store.add("word", 100, None, None).unwrap().entry;
         assert_eq!(entry.unit_id, INBOX_UNIT_ID, "新词落收词箱");
 
         store.move_entry(&entry.id, &unit.id).unwrap();
@@ -1077,6 +1239,8 @@ mod tests {
         let list = store.list().unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].unit_id, INBOX_UNIT_ID, "缺省 unitId → 收词箱");
+        assert!(list[0].context.is_none(), "旧文件无语境字段 → None");
+        assert!(list[0].sense.is_none(), "旧文件无主词义 → None");
     }
 
     #[test]
@@ -1132,9 +1296,9 @@ mod tests {
     fn group_apply_creates_units_and_undo_recycles() {
         let dir = temp_dir("group");
         let store = VocabularyStore::open(&dir);
-        let a = store.add("apple", 1).unwrap().entry;
-        let b = store.add("apply", 1).unwrap().entry;
-        let c = store.add("banana", 1).unwrap().entry;
+        let a = store.add("apple", 1, None, None).unwrap().entry;
+        let b = store.add("apply", 1, None, None).unwrap().entry;
+        let c = store.add("banana", 1, None, None).unwrap().entry;
 
         let groups = vec![
             GroupSpec {
@@ -1189,7 +1353,7 @@ mod tests {
     fn review_records_last_grade_and_move_locks_unit() {
         let dir = temp_dir("last-grade");
         let store = VocabularyStore::open(&dir);
-        let entry = store.add("word", 1).unwrap().entry;
+        let entry = store.add("word", 1, None, None).unwrap().entry;
         let unit = store.unit_create("U", 1, &UnitCreateOpts::default()).unwrap();
 
         let next = ScheduleUpdate {

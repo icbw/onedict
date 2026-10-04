@@ -6,6 +6,25 @@
 
 export type ReviewGrade = "again" | "hard" | "good" | "easy";
 
+/** 收词语境（查词场景记忆；sentence 空 = 降级态，仅来源元数据） */
+export interface EntryContext {
+  /** 原句，词形保持原样——遇到的词形本身就是记忆对象 */
+  sentence: string;
+  /** 选区词偏移 [start, end)，UTF-16 code unit（JS 字符串索引直接可用）；null = 未定位到 */
+  wordOffset: [number, number] | null;
+  sourceApp: string | null;
+  /** selection / clipboard / manual（ocr 预留） */
+  kind: string;
+  capturedAt: number;
+}
+
+/** 主复习词义（释义级收藏）：释义文本快照，词典文件更新不失效 */
+export interface EntrySense {
+  /** 来源词典（展示用；词典移除后兜底显示 id） */
+  dictId: string;
+  definition: string;
+}
+
 export interface VocabularyEntry {
   id: string;
   /** 用户原样添加的词头（仅 trim/空白归一化） */
@@ -26,6 +45,10 @@ export interface VocabularyEntry {
   lapses: number;
   /** 最近一次评分（不确定词判定用；旧数据为 null） */
   lastGrade: ReviewGrade | null;
+  /** 收词语境（旧数据 / 纯词头收藏 = null） */
+  context: EntryContext | null;
+  /** 主复习词义（无释义收藏 = null，复习回落通用义） */
+  sense: EntrySense | null;
 }
 
 /** 单元来源：手工创建 / 自动聚合 */

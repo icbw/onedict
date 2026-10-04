@@ -35,6 +35,29 @@ pub fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
     }
 }
 
+/// 原子写字节（write_atomic 的二进制形态；缓存音频等非文本载荷）。
+pub fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    let tmp = path.with_file_name(name);
+
+    let write_tmp = || -> Result<(), String> {
+        let mut f = std::fs::File::create(&tmp).map_err(|e| format!("创建临时文件失败: {e}"))?;
+        f.write_all(bytes).map_err(|e| format!("写入临时文件失败: {e}"))?;
+        f.sync_all().map_err(|e| format!("刷盘失败: {e}"))?;
+        Ok(())
+    };
+    write_tmp()?;
+
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(rename_err) => {
+            std::fs::write(path, bytes)
+                .map_err(|e| format!("写入失败（rename: {rename_err}；直写: {e}）"))
+        }
+    }
+}
+
 /// 提权创建目录（UAC 依赖数据目录）：安装位于系统目录
 /// （Program Files 等）时普通权限 `create_dir_all` 失败，经 ShellExecuteW
 /// `runas` 弹 UAC，由提权 cmd 完成两步——`mkdir` + `icacls` 授 Users 组

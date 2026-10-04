@@ -404,6 +404,10 @@ fn finish_capture(
     // 已是 topmost 时是彻底的 no-op（tao 差量应用），被压住后永不恢复（见
     // tray::raise_topmost 的现场说明）
     crate::tray::raise_topmost(window);
+    // 懒扩句锚点（收藏语境捕获用）：捕获时源应用为前台——记下句柄与时刻；
+    // UIA 路径随后台预扩句（此刻选区存活，面板抢焦点后源应用 GetSelection 报空，
+    // 语境必须趁前台预取，见 expand::spawn_pre_expansion）
+    let (anchor_hwnd, anchor_at) = (foreground_hwnd(), now_ms_i64());
     if let Ok(mut st) = SHARED.lock() {
         st.toolbar = Some(PhysRect {
             x: pos.x,
@@ -414,6 +418,17 @@ fn finish_capture(
         st.toolbar_visible = true;
         st.last_text = text.clone(); // 动作面板取词来源
         st.notice = None; // 真实划词顶掉可能还在显示的开关提示条（定时隐藏随之失效）
+        st.capture_anchor = Some(super::CaptureAnchor {
+            source_hwnd: anchor_hwnd,
+            text: text.clone(),
+            mode,
+            source_app: program_name.clone(),
+            captured_at: anchor_at,
+            pre_expanded: None,
+        });
+    }
+    if mode == "uia" {
+        super::expand::spawn_pre_expansion(anchor_hwnd, text.clone(), anchor_at);
     }
 
     let t5 = Instant::now();
@@ -558,6 +573,20 @@ fn fallback(window: &tauri::WebviewWindow) -> (f64, PhysRect) {
 
 fn ms(later: Instant, earlier: Instant) -> f64 {
     later.duration_since(earlier).as_secs_f64() * 1000.0
+}
+
+/// 捕获锚点的墙钟时间（语境 capturedAt 用）
+fn now_ms_i64() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 当前前台窗口句柄（捕获时刻源应用；HWND as isize，0 = 无前台）
+fn foreground_hwnd() -> isize {
+    // SAFETY: 无参数窗口查询
+    unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as isize }
 }
 
 /// windows-rs 对「S_OK + null 元素」报 0x00000000 假错误——还原为可读原因

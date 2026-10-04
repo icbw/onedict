@@ -1,6 +1,7 @@
 /**
  * 词条 iframe 引导脚本（BOOT_SCRIPT 正文）：点击委托（entry:// 重查 / sound://·
- * webaudio:// 播放回传 / say:// 例句朗读）+ 高度上报 + 例句朗读按钮注入。
+ * webaudio:// 播放回传 / say:// 例句朗读 / sense-save://·sense-query:// 拖选工具条）+
+ * 高度上报 + 例句朗读按钮注入。
  *
  * **本文件是真实 .js**，由 `dictFrame.ts` 用 vite `?raw` 内联进 srcdoc——不要改写成
  * TS 模板字符串：打包产物里模板（含 String.raw）会被改写，实测正则转义被吃掉
@@ -85,13 +86,15 @@
   // 2–60 字）→ 延迟 400ms 跳词组查询（走 onedict-word 同管道，父层入导航栈）。
   // 延迟窗口内选区变化/再次按下 → 取消，保护「拖选只为复制」场景。与单击查字
   // 天然互斥（拖选结束不产生 click；双击选词走本路径 = 查整词）。
-  var pickPhrase = function () {
+  // 拖选文本规整（max = 长度上限；折叠/过短/超限 → null）
+  var selectionText = function (max) {
     var sel = document.getSelection();
     if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
     var text = sel.toString().replace(/\s+/g, ' ').trim();
-    if (!text || text.length < 2 || text.length > 60) return null;
+    if (!text || text.length < 2 || text.length > max) return null;
     return text;
   };
+  var pickPhrase = function () { return selectionText(60); };
   var phraseTimer = null;
   var cancelPhrase = function () {
     if (phraseTimer) {
@@ -99,21 +102,98 @@
       phraseTimer = null;
     }
   };
+  // ── 释义级收藏（拖选工具条）：拖选完成 → 选区上方浮出「查 / 收藏此义」。
+  // 拖选的词组查询从 400ms 自动触发改为工具条「查」按钮显式触发：选中一条中文
+  // 短释义（如「v. 拿；取」）会被自动当词组查询跳词 MISS，收藏动作无从完成——
+  // 拖选语义让位给收藏（M2b），查询意图显式化；双击查整词路径不受影响，
+  // 「拖选只为复制」也不再被跳词打断。宿主不接 onedict-sense 的帧（复习卡）
+  // 经 ONEDICT_SENSE_ENABLED=false 整体关闭（浮条点了没反应）。
+  // 拖选 mouseup 同时上报 onedict-selection：父页压掉全局划词浮标（无自身窗口
+  // 豁免，拖选帧内文本会弹浮标；原靠 400ms 后的 via select 查询顺带压制，现在
+  // 查询不再自动发生，须主动报）。
+  var SENSE_TEXT_MAX = 500; // 选区上限（防整篇误选；与语境句入库截断同量级）
+  var senseBar = null;
+  var senseStyled = false;
+  var ensureSenseStyle = function () {
+    if (senseStyled) return;
+    senseStyled = true;
+    var style = document.createElement('style');
+    style.textContent =
+      '.onedict-sensebar{position:absolute;z-index:2147483647;display:flex;gap:2px;' +
+      'background:#1f2937;border-radius:6px;padding:3px;box-shadow:0 2px 8px rgba(0,0,0,.3)}' +
+      '.onedict-sensebar a{color:#fff;cursor:pointer;font-size:12px;line-height:1;' +
+      'padding:4px 8px;border-radius:4px;text-decoration:none;white-space:nowrap}' +
+      '.onedict-sensebar a:hover{background:#374151}';
+    document.head.appendChild(style);
+  };
+  var removeSenseBar = function () {
+    if (senseBar && senseBar.parentNode) senseBar.parentNode.removeChild(senseBar);
+    senseBar = null;
+  };
+  var makeSenseAction = function (label, scheme, text) {
+    var a = document.createElement('a');
+    a.setAttribute('href', scheme + '://1');
+    a.setAttribute('data-text', text);
+    a.textContent = label;
+    return a;
+  };
+  var showSenseBar = function () {
+    if (window.ONEDICT_SENSE_ENABLED === false) return;
+    var text = selectionText(SENSE_TEXT_MAX);
+    if (!text) return;
+    var sel = document.getSelection();
+    var rect = null;
+    try { rect = sel.getRangeAt(0).getBoundingClientRect(); } catch (err) {}
+    if (!rect) return;
+    removeSenseBar(); // 重建到新选区位置（调整选区后再次 mouseup）
+    ensureSenseStyle();
+    var bar = document.createElement('div');
+    bar.className = 'onedict-sensebar';
+    if (pickPhrase()) bar.appendChild(makeSenseAction('查', 'sense-query', text));
+    bar.appendChild(makeSenseAction('收藏此义', 'sense-save', text));
+    // 工具条上 mousedown preventDefault：点击按钮不折叠选区（否则按钮在 click
+    // 派发前就随 selectionchange 消失，动作落空）
+    bar.addEventListener('mousedown', function (e) { e.preventDefault(); });
+    document.body.appendChild(bar);
+    // 定位：选区上方（顶到视口边则放下方）；横坐标 clamp 在文档内
+    var bw = bar.offsetWidth || 120;
+    var bh = bar.offsetHeight || 26;
+    var sx = window.scrollX || 0;
+    var sy = window.scrollY || 0;
+    var viewW = document.documentElement.clientWidth || 0;
+    var left = Math.max(sx, Math.min(rect.left + sx, sx + viewW - bw));
+    var above = rect.top >= bh + 8;
+    bar.style.left = left + 'px';
+    bar.style.top = (above ? rect.top + sy - bh - 4 : rect.bottom + sy + 4) + 'px';
+    senseBar = bar;
+    post({ type: 'onedict-selection' }); // 压全局划词浮标（见上）
+  };
   document.addEventListener('mouseup', function (e) {
     if (e.button !== 0) return;
     cancelPhrase(); // 上一次未触发的拖选意图作废
-    var phrase = pickPhrase();
-    if (!phrase) return;
-    phraseTimer = setTimeout(function () {
-      phraseTimer = null;
-      // 延迟期间选区被折叠/改动 → 放弃（still 比对同一文本）
-      var still = pickPhrase();
-      if (still && still === phrase) {
-        post({ type: 'onedict-word', word: phrase, via: 'select' });
-      }
-    }, 400);
+    if (e.detail >= 2) {
+      // 双击/三击选词（原生边界）：选完即查整词——400ms 漂移防抖照旧（延迟窗口内
+      // 选区变化/再次按下取消），拖选查询显式化后这是仅存的自动查询路径
+      var phrase = pickPhrase();
+      if (!phrase) return;
+      phraseTimer = setTimeout(function () {
+        phraseTimer = null;
+        // 延迟期间选区被折叠/改动 → 放弃（still 比对同一文本）
+        var still = pickPhrase();
+        if (still && still === phrase) {
+          post({ type: 'onedict-word', word: phrase, via: 'select' });
+        }
+      }, 400);
+      return;
+    }
+    showSenseBar();
   }, true);
-  document.addEventListener('selectionchange', cancelPhrase);
+  document.addEventListener('selectionchange', function () {
+    cancelPhrase();
+    var sel = document.getSelection();
+    if (!sel || sel.isCollapsed) removeSenseBar(); // 点选区外 = 收起工具条
+  });
+  window.addEventListener('scroll', removeSenseBar, true); // 滚动后位置失准，直接收起
   var pickOnClick = function (e) {
     if (e.button !== 0 || e.detail > 1) return; // 仅左键单击；双击留给原生选词
     // 选区非折叠 = 拖选/双击选词刚结束——**同元素内拖选 click 照常派发**（仅跨元素
@@ -315,6 +395,19 @@
       var sayText = a.getAttribute('data-text') || '';
       var sayWhich = a.getAttribute('data-which') === 'b' ? 'b' : 'a';
       if (sayText) startSound(a, href, { type: 'onedict-speak', text: sayText, which: sayWhich });
+    } else if (href.indexOf('sense-save://') === 0) {
+      // 释义级收藏（拖选工具条）：选中文本快照经 onedict-sense 回宿主
+      // （vocabulary_add 带 sense；词已存在则更新主词义，最新收藏胜出）
+      e.preventDefault();
+      var defText = a.getAttribute('data-text') || '';
+      removeSenseBar();
+      if (defText) post({ type: 'onedict-sense', text: defText });
+    } else if (href.indexOf('sense-query://') === 0) {
+      // 工具条「查」：拖选词组查询（原 400ms 自动路径的显式化，via select 管道不变）
+      e.preventDefault();
+      var qText = a.getAttribute('data-text') || '';
+      removeSenseBar();
+      if (qText) post({ type: 'onedict-word', word: qText, via: 'select' });
     } else if (href.indexOf('http') === 0 || href.indexOf('javascript:') === 0) {
       e.preventDefault();
       // 在线源帧允许 http(s) 外链委托出去（父页按偏好分流：浏览器 / 转内部查词；

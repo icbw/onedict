@@ -850,6 +850,19 @@ function PronounceSection({ prefsTick = 0 }: { prefsTick?: number }) {
                     onCheckedChange={(v) => save({ fallbackMissing: v })}
                   />
                 </SettingRow>
+                <SettingRow>
+                  <div className="min-w-0 flex-1">
+                    <SettingRowTitle>复习语音预取</SettingRowTitle>
+                    <SettingDescription>
+                      后台预合成今日复习的词与语境句（落本地缓存，断网复习也有在线音质；
+                      串行低并发、失败静默）。批量在线合成消耗流量，默认关闭。
+                    </SettingDescription>
+                  </div>
+                  <Switch
+                    checked={prefs.voicePrefetch ?? false}
+                    onCheckedChange={(v) => save({ voicePrefetch: v })}
+                  />
+                </SettingRow>
               </div>
             </>
           ) : (

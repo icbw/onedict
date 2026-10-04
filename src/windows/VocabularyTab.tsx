@@ -43,7 +43,8 @@ import {
 } from "../components/SettingsPrimitives";
 import { cn } from "../lib/utils";
 import { planGroups } from "../lib/grouping";
-import {
+import { clearVoiceCacheForEntries, prefetchVoiceAudio } from "../services/voicePrefetch";
+import type { PrefsPayload, PronouncePrefs } from "../types/prefs";import {
   buildUnitStats,
   isUnsure,
   MASTERED_REPETITIONS,
@@ -121,6 +122,14 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
   const [reviewLog, setReviewLog] = useState<ReviewLog>({});
   /** 单元日志：轮次 / 抽查 / 分组（vocabulary_unit_log） */
   const [unitLog, setUnitLog] = useState<UnitLogSnapshot>(EMPTY_UNIT_LOG);
+  /** 发音偏好（语音预取开关与音源/语速配置；挂载读一次，变更重开页生效） */
+  const [pronounce, setPronounce] = useState<PronouncePrefs | null>(null);
+
+  useEffect(() => {
+    void invoke<PrefsPayload>("prefs_get")
+      .then((p) => setPronounce(p.pronounce ?? null))
+      .catch(() => {});
+  }, []);
 
   const refresh = useCallback(() => {
     setNow(Date.now());
@@ -203,6 +212,15 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
     () => (plan.length > 0 ? units.find((u) => u.id === plan[0].id) ?? null : null),
     [plan, units],
   );
+
+  /** 今日计划语音预取（M3，设置页开关默认关）：计划确定即后台合成该批
+   *  词 + 语境句落 voice-cache（串行低并发、失败静默；只加速不承诺） */
+  useEffect(() => {
+    if (!pronounce || plan.length === 0 || entries === null) return;
+    const planIds = new Set(plan.map((s) => s.id));
+    const planEntries = entries.filter((e) => planIds.has(e.unitId));
+    if (planEntries.length > 0) prefetchVoiceAudio(planEntries, pronounce);
+  }, [pronounce, plan, entries]);
 
   // ── 学习统计：三图数据派生（reviewLog 随 refresh 与 entries 同批刷新）──
   const reviewDays = useMemo(() => stackReviewDays(reviewLog, 30, now), [reviewLog, now]);
@@ -322,6 +340,9 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
         mastered,
         own.length,
       );
+      // 毕业即主动清该单元词条的语音缓存（加速器：按当前配置重算 key 删除，
+      // 算不出的旧键由 voice-cache 的 LRU 容量上限兜底回收）
+      if (graduate) void clearVoiceCacheForEntries(own, pronounce);
       void invoke("vocabulary_unit_round_commit", {
         unitId: unit.id,
         record: {
@@ -337,7 +358,7 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
         },
       }).catch(() => {});
     },
-    [units, entries, unitLog],
+    [units, entries, unitLog, pronounce],
   );
 
   /** 收词箱智能分组：时间批次 + 词形族（落盘走 group_apply，可撤销） */
@@ -404,6 +425,10 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
   };
 
   const removeUnit = (id: string) => {
+    // 删除单元 = 词条随删（收词箱回收？Rust 侧语义：词条回收进收词箱）——
+    // 语音缓存主动清（加速器，LRU 兜底）
+    const own = (entries ?? []).filter((e) => e.unitId === id);
+    if (own.length > 0) void clearVoiceCacheForEntries(own, pronounce);
     void invoke("vocabulary_unit_remove", { id }).catch(() => {});
   };
 

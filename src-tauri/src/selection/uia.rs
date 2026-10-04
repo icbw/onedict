@@ -45,6 +45,41 @@ impl Uia {
         unsafe { self.automation.GetFocusedElement() }
     }
 
+    /// 窗口句柄取元素（语境重导航入口：收藏时动作面板盖住选区，屏幕坐标不可信，
+    /// 按捕获时记下的源应用窗口句柄直达）
+    pub fn element_from_handle(&self, hwnd: isize) -> WResult<IUIAutomationElement> {
+        // SAFETY: COM 接口调用
+        unsafe {
+            self.automation
+                .ElementFromHandle(windows::Win32::Foundation::HWND(hwnd as *mut core::ffi::c_void))
+        }
+    }
+
+    /// 后代中首个支持 TextPattern 的元素（Chromium 的文档节点在渲染窗口元素
+    /// 之下，句柄元素自身无 TextPattern 时向下找；选区校验兜底，找错元素无后果）
+    pub fn first_text_pattern_descendant(
+        &self,
+        element: &IUIAutomationElement,
+    ) -> WResult<IUIAutomationTextPattern> {
+        // SAFETY: COM 接口调用 + 属性条件构造（IsTextPatternAvailable = VARIANT_TRUE）。
+        // 手动布 VT_BOOL VARIANT（union 字段写入本 unsafe 块内；ManuallyDrop 显式解引）
+        unsafe {
+            let mut value = windows::Win32::System::Variant::VARIANT::default();
+            (*value.Anonymous.Anonymous).vt = windows::Win32::System::Variant::VT_BOOL;
+            (*value.Anonymous.Anonymous).Anonymous.boolVal =
+                windows::Win32::Foundation::VARIANT_BOOL(-1);
+            let condition = self.automation.CreatePropertyCondition(
+                windows::Win32::UI::Accessibility::UIA_IsTextPatternAvailablePropertyId,
+                &value,
+            )?;
+            let found = element.FindFirst(
+                windows::Win32::UI::Accessibility::TreeScope_Descendants,
+                &condition,
+            )?;
+            self.text_pattern(&found)
+        }
+    }
+
     /// 前台窗口元素兜底：GetFocusedElement 对部分 provider 返回 S_OK + null
     /// （Acrobat 保护模式 / Gecko 等），改从前台 HWND 取元素再试 TextPattern
     pub fn element_from_foreground(&self) -> WResult<IUIAutomationElement> {

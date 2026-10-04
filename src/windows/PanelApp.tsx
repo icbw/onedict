@@ -29,6 +29,7 @@ import {
 } from "../lib/wordNav";
 import { resolveActions, type ResolvedAction } from "../lib/actions";
 import type { PanelTextEvent } from "../types/selection";
+import type { EntryContext } from "../types/vocabulary";
 import type { PrefsPayload } from "../types/prefs";
 import ActionGeneral from "./panel/ActionGeneral";
 import ActionTranslate from "./panel/ActionTranslate";
@@ -160,12 +161,39 @@ export default function PanelApp() {
 
   const addToVocabulary = useCallback(() => {
     if (!word.trim()) return;
-    invoke<{ created: boolean }>("vocabulary_add", { word })
-      .then((r) => {
-        setInVocabulary(true);
-        setVocabHint(r.created ? "已加入生词本" : "已在生词本中");
-      })
-      .catch(() => setVocabHint("加入失败"));
+    (async () => {
+      // 懒扩句：收藏时才按最近捕获的锚点取原句语境（不进划词热路径）。
+      // 无锚点 / 面板词与锚点不匹配（OCR 复用面板等）→ manual 来源，无语境。
+      let context: EntryContext | null = null;
+      try {
+        context = await invoke<EntryContext | null>("selection_expand_context", {
+          word,
+        });
+      } catch {
+        context = null;
+      }
+      if (!context) {
+        context = {
+          sentence: "",
+          wordOffset: null,
+          sourceApp: null,
+          kind: "manual",
+          capturedAt: Date.now(),
+        };
+      }
+      const r = await invoke<{ created: boolean; updated: boolean }>(
+        "vocabulary_add",
+        { word, context },
+      );
+      setInVocabulary(true);
+      setVocabHint(
+        r.created
+          ? "已加入生词本"
+          : r.updated
+            ? "已在生词本，已补充语境"
+            : "已在生词本中",
+      );
+    })().catch(() => setVocabHint("加入失败"));
   }, [word]);
 
   const togglePin = useCallback(() => {

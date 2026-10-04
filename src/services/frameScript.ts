@@ -29,12 +29,15 @@ export interface SayButtonSpec {
  *                   本地词条帧保持 http 链接 preventDefault 的死链语义不变
  *  sayButtons = 例句朗读双按钮的外观（缺省帧内用「女声 / 男声」占位）
  *  say = 是否注入例句朗读按钮（缺省注入）；宿主不接 `onedict-speak` 时须显式关掉，
- *        否则帧里全是点了没反应的喇叭（复习卡帧即此情形） */
+ *        否则帧里全是点了没反应的喇叭（复习卡帧即此情形）
+ *  sense = 是否注入拖选收藏工具条（缺省注入）；宿主不接 `onedict-sense` 时须显式
+ *          关掉，否则拖选浮出的「收藏此义」点了没反应（复习卡帧即此情形） */
 export interface SrcdocOptions {
   css?: string;
   allowExternal?: boolean;
   sayButtons?: SayButtonSpec[];
   say?: boolean;
+  sense?: boolean;
 }
 
 /** 发音锚点文本是否只是「音标窗口」（`UK /teɪk/`、`美 [teɪk]` 之类）——
@@ -60,7 +63,8 @@ export function buildSrcdoc(
     `<script>var ONEDICT_LOOKUP_TOKEN=${token};` +
     `var ONEDICT_ALLOW_EXTERNAL=${opts?.allowExternal ? "true" : "false"};` +
     `var ONEDICT_SAY_BUTTONS=${buttons};` +
-    `var ONEDICT_SAY_ENABLED=${opts?.say === false ? "false" : "true"};<\/script>`;
+    `var ONEDICT_SAY_ENABLED=${opts?.say === false ? "false" : "true"};` +
+    `var ONEDICT_SENSE_ENABLED=${opts?.sense === false ? "false" : "true"};<\/script>`;
   const css = opts?.css ? `<style>${opts.css}</style>` : "";
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><base target="_self">${flags}${css}${bootScript}</head><body>${entryHtml}</body></html>`;
 }
