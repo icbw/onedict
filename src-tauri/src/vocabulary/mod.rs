@@ -27,6 +27,8 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+pub mod card;
+
 const FILE_VERSION: u32 = 1;
 
 /// 内置收词箱单元 id（不落盘，前端固定渲染；查词页加词的落点）
@@ -110,6 +112,9 @@ pub struct VocabularyEntry {
     /// 主复习词义（无释义收藏 = None，复习回落通用义）
     #[serde(default)]
     pub sense: Option<EntrySense>,
+    /// 卡面数据（收藏后后台 AI 整理；旧文件 / AI 未配置 = None，卡面降级态）
+    #[serde(default)]
+    pub card: Option<card::EntryCard>,
 }
 
 /// 单元容量默认值（新建 / 自动分组未显式指定时的生词上限）
@@ -392,6 +397,7 @@ impl VocabState {
             last_grade: None,
             context,
             sense,
+            card: None,
         };
         self.entries.push(entry.clone());
         self.persist();
@@ -681,6 +687,30 @@ impl VocabularyStore {
         self.with(|s| s.has(word))
     }
 
+    /// 按 id 取词条（卡面整理管线读语境 / sense / 既有卡面）
+    pub fn entry(&self, id: &str) -> Result<Option<VocabularyEntry>, String> {
+        self.with(|s| s.entries.iter().find(|e| e.id == id).cloned())
+    }
+
+    /// 写入卡面数据（不存在 = None 静默；写入即落盘并返回更新后词条）
+    pub fn set_card(
+        &self,
+        id: &str,
+        card: card::EntryCard,
+    ) -> Result<Option<VocabularyEntry>, String> {
+        self.with(|s| {
+            match s.entries.iter_mut().find(|e| e.id == id) {
+                Some(entry) => {
+                    entry.card = Some(card);
+                    let updated = entry.clone();
+                    s.persist();
+                    Some(updated)
+                }
+                None => None,
+            }
+        })
+    }
+
     pub fn add(
         &self,
         word: &str,
@@ -776,7 +806,47 @@ pub fn vocabulary_add(
 ) -> Result<AddResult, String> {
     let result = store.add(&word, now_ms(), context, sense)?;
     broadcast_change(&app);
+    // 收藏后整理卡面：请求主窗口前端管线执行（词典复用 + AI 兜底；管线内部幂等
+    // ——已有卡面跳过）。面板窗口短生命周期，执行体不能放在发起窗口。
+    card::broadcast_request(
+        &app,
+        &card::CardRequest { id: result.entry.id.clone(), force: false },
+    );
     Ok(result)
+}
+
+/// 手动重新整理卡面（卡面降级态 / 卡面「重新整理」按钮）：force 重跑覆盖已有卡面
+#[tauri::command]
+pub fn vocabulary_card_generate(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    card::broadcast_request(&app, &card::CardRequest { id, force: true });
+    Ok(())
+}
+
+/// 按 id 取词条（前端卡面管线的执行凭据：词头 / 语境 / 主词义）
+#[tauri::command]
+pub fn vocabulary_entry(
+    store: tauri::State<'_, VocabularyStore>,
+    id: String,
+) -> Result<Option<VocabularyEntry>, String> {
+    store.entry(&id)
+}
+
+/// 前端管线写回卡面数据：清洗截断 → 落盘 → 广播（vocabulary-changed 全量刷新 +
+/// vocabulary-card 单条回灌）
+#[tauri::command]
+pub fn vocabulary_card_set(
+    store: tauri::State<'_, VocabularyStore>,
+    app: tauri::AppHandle,
+    id: String,
+    card: card::EntryCard,
+) -> Result<VocabularyEntry, String> {
+    let card = card::sanitize_card(card);
+    let updated = store
+        .set_card(&id, card)?
+        .ok_or_else(|| "词条不存在".to_string())?;
+    broadcast_change(&app);
+    card::broadcast_entry(&app, &updated);
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -1098,6 +1168,59 @@ mod tests {
         // 未超长 → 偏移保留
         let ctx = EntryContext { sentence: "正常句子".into(), word_offset: Some([2, 4]), ..Default::default() };
         assert_eq!(sanitize_context(ctx).word_offset, Some([2, 4]));
+    }
+
+    #[test]
+    fn legacy_file_without_card_loads_as_none() {
+        // 旧文件（无 card 字段）解析 card=None：零破坏兼容（serde default）
+        let dir = temp_dir("legacy-card");
+        std::fs::write(
+            dir.join("vocabulary.json"),
+            r#"{"version":1,"entries":[{"id":"e1","word":"debris","normKey":"debris","note":"","addedAt":1,"easeFactor":2.5,"intervalDays":0,"repetitions":0,"dueAt":1,"lastReviewedAt":null,"reviewCount":0,"lapses":0}],"units":[]}"#,
+        )
+        .unwrap();
+        let store = VocabularyStore::open(&dir);
+        let entry = store.entry("e1").unwrap().unwrap();
+        assert!(entry.context.is_none());
+        assert!(entry.sense.is_none());
+        assert!(entry.card.is_none(), "旧文件无 card 字段 → None");
+    }
+
+    #[test]
+    fn set_card_persists_and_survives_reload() {
+        let dir = temp_dir("card");
+        let store = VocabularyStore::open(&dir);
+        let entry = store.add("debris", 1, None, None).unwrap().entry;
+
+        let card = card::EntryCard {
+            senses: vec![card::CardSense {
+                pos: Some("n.".into()),
+                definition: "碎片；残骸".into(),
+                example: Some("Debris was everywhere.".into()),
+                example_zh: Some("到处都是碎片。".into()),
+                definition_en: Some("pieces of wood, metal, brick, etc.".into()),
+                source: Some("O8C".into()),
+            }],
+            sentences: vec![card::CardSentence {
+                en: "The storm left debris everywhere.".into(),
+                zh: Some("暴风雨过后到处是残骸。".into()),
+                source: Some("web-bing".into()),
+            }],
+            phonetic: Some("/ˈdebriː/".into()),
+            sentence_zh: None,
+            source: "web".into(),
+            generated_at: 42,
+        };
+        let updated = store.set_card(&entry.id, card.clone()).unwrap().unwrap();
+        assert_eq!(updated.card.as_ref(), Some(&card));
+
+        // 重启后仍在（roundtrip）
+        let store = VocabularyStore::open(&dir);
+        let reloaded = store.entry(&entry.id).unwrap().unwrap();
+        assert_eq!(reloaded.card.as_ref(), Some(&card));
+
+        // 不存在的 id：静默 None
+        assert!(store.set_card("no-such-id", card).unwrap().is_none());
     }
 
     #[test]

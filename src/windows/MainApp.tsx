@@ -19,6 +19,7 @@ import {
 import { Tooltip } from "@onedict/ui/components/tooltip";
 import { cn } from "../lib/utils";
 import { useUpdateAvailable } from "../lib/useUpdateAvailable";
+import { initVocabCardPipeline } from "../services/vocabCard";
 import DictionaryTab from "./DictionaryTab";
 import VocabularyTab from "./VocabularyTab";
 import TranslateTab from "./TranslateTab";
@@ -39,6 +40,9 @@ export default function MainApp() {
   // 启动检查命中（偏好「启动时检查更新」开启才可能发生）：在设置入口标点，进设置即收起
   const updateAvailable = useUpdateAvailable();
   const [updateSeen, setUpdateSeen] = useState(false);
+
+  // 生词卡卡面整理管线（主窗口常驻执行体）：收藏/重试事件 + 旧词启动补齐
+  useEffect(() => initVocabCardPipeline(), []);
 
   useEffect(() => {
     if (tab === "settings") setUpdateSeen(true);

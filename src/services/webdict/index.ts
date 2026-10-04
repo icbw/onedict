@@ -13,6 +13,35 @@ import type { DictItemPref } from "../../types/prefs";
 export interface WebDictResult {
   /** 已消毒、已拼装的分区 HTML（进 iframe srcdoc） */
   html: string;
+  /** 卡面提取用的结构化释义（引擎解析时顺带产出，纯文本；生词卡管线消费） */
+  structured?: WebDictStructured;
+}
+
+/** 一条结构化释义（纯文本；与分区 HTML 同源同真相） */
+export interface WebDictSense {
+  /** 词性 / 标签（n. / v. / 网络等；空 = 未分组） */
+  pos: string;
+  /** 释义（中文向：bing 中文串 / youdao li / cambridge 中文翻译） */
+  definition: string;
+  /** 英文定义（cambridge 英英；多数源无） */
+  definitionEn?: string;
+  /** 绑定例句（cambridge 义项内例句） */
+  example?: string;
+  exampleZh?: string;
+}
+
+/** 词典独立例句区的例句（原文 + 对译） */
+export interface WebDictSentence {
+  en: string;
+  cn: string;
+}
+
+export interface WebDictStructured {
+  /** 音标（首个可用，带 // 包裹形态） */
+  phonetic?: string;
+  senses: WebDictSense[];
+  /** 独立例句区的例句（非义项绑定） */
+  sentences: WebDictSentence[];
 }
 
 export interface WebDictDef {

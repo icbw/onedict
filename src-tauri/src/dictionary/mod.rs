@@ -387,6 +387,22 @@ pub fn dictionary_list(registry: tauri::State<'_, Registry>) -> Result<Vec<DictM
         .collect())
 }
 
+/// 当前启用词典 id 列表（偏好序）。非 IPC：生词卡卡面整理管线取材料用。
+pub fn enabled_dict_ids(registry: &Registry) -> Vec<String> {
+    registry
+        .ensure_root()
+        .ok()
+        .and_then(|root| registry.merged_items(&root).ok())
+        .map(|items| {
+            items
+                .into_iter()
+                .filter(|(_, enabled)| *enabled)
+                .map(|(id, _)| id)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// 后台启动预热：延迟 2.5s（等主窗口首帧渲染完成），再以低优先级线程遍历词典——
 /// 已缓存的毫秒级装入；未缓存的就地解析并写缓存。主程序启动流程完全不等待预热，
 /// 避免词典解析与 webview 启动抢 CPU 拖慢前台（用户可感的启动时间）。

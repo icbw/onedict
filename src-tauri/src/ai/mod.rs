@@ -161,7 +161,7 @@ struct ChatBody {
     thinking: Option<serde_json::Value>,
 }
 
-fn build_body(model: &str, messages: &[ChatMessage], no_think: bool) -> ChatBody {
+fn build_body(model: &str, messages: &[ChatMessage], no_think: bool, stream: bool) -> ChatBody {
     let (reasoning_effort, enable_thinking, reasoning, thinking) = if no_think {
         (
             Some("minimal"),
@@ -175,7 +175,7 @@ fn build_body(model: &str, messages: &[ChatMessage], no_think: bool) -> ChatBody
     ChatBody {
         model: model.to_string(),
         messages: messages.iter().map(openai_chat_message).collect(),
-        stream: true,
+        stream,
         reasoning_effort,
         enable_thinking,
         reasoning,
@@ -218,7 +218,12 @@ fn join_system(messages: &[ChatMessage]) -> Option<String> {
 }
 
 /// OpenAI Responses API 请求体：system → instructions，其余 → input[]
-fn build_responses_body(model: &str, messages: &[ChatMessage], no_think: bool) -> serde_json::Value {
+fn build_responses_body(
+    model: &str,
+    messages: &[ChatMessage],
+    no_think: bool,
+    stream: bool,
+) -> serde_json::Value {
     let input: Vec<serde_json::Value> = messages
         .iter()
         .filter(|m| m.role != "system")
@@ -227,7 +232,7 @@ fn build_responses_body(model: &str, messages: &[ChatMessage], no_think: bool) -
     let mut body = serde_json::json!({
         "model": model,
         "input": input,
-        "stream": true,
+        "stream": stream,
     });
     if let Some(instructions) = join_system(messages) {
         body["instructions"] = serde_json::json!(instructions);
@@ -241,7 +246,7 @@ fn build_responses_body(model: &str, messages: &[ChatMessage], no_think: bool) -
 
 /// Anthropic Messages 请求体：system 单独字段、messages 只收 user/assistant、
 /// max_tokens 必填（取宽裕默认 8192）；思考默认即关，不携带 thinking 参数
-fn build_anthropic_body(model: &str, messages: &[ChatMessage]) -> serde_json::Value {
+fn build_anthropic_body(model: &str, messages: &[ChatMessage], stream: bool) -> serde_json::Value {
     let msgs: Vec<serde_json::Value> = messages
         .iter()
         .filter(|m| m.role == "user" || m.role == "assistant")
@@ -250,7 +255,7 @@ fn build_anthropic_body(model: &str, messages: &[ChatMessage]) -> serde_json::Va
     let mut body = serde_json::json!({
         "model": model,
         "max_tokens": 8192,
-        "stream": true,
+        "stream": stream,
         "messages": msgs,
     });
     if let Some(system) = join_system(messages) {
@@ -267,12 +272,13 @@ fn build_request(
     model: &str,
     messages: &[ChatMessage],
     no_think: bool,
+    stream: bool,
 ) -> (String, reqwest::RequestBuilder) {
     let base = endpoint.trim().trim_end_matches('/');
     match kind {
         ApiKind::OpenAiChat => {
             let url = format!("{base}/chat/completions");
-            let mut req = client().post(&url).json(&build_body(model, messages, no_think));
+            let mut req = client().post(&url).json(&build_body(model, messages, no_think, stream));
             if let Some(k) = api_key.filter(|k| !k.trim().is_empty()) {
                 req = req.bearer_auth(k);
             }
@@ -282,7 +288,7 @@ fn build_request(
             let url = format!("{base}/responses");
             let mut req = client()
                 .post(&url)
-                .json(&build_responses_body(model, messages, no_think));
+                .json(&build_responses_body(model, messages, no_think, stream));
             if let Some(k) = api_key.filter(|k| !k.trim().is_empty()) {
                 req = req.bearer_auth(k);
             }
@@ -295,7 +301,7 @@ fn build_request(
             let mut req = client()
                 .post(&url)
                 .header("anthropic-version", "2023-06-01")
-                .json(&build_anthropic_body(model, messages));
+                .json(&build_anthropic_body(model, messages, stream));
             if let Some(k) = api_key.filter(|k| !k.trim().is_empty()) {
                 req = req.header("x-api-key", k);
             }
@@ -502,6 +508,7 @@ pub async fn ai_stream(
         &model,
         &messages,
         no_think,
+        true,
     );
     tracing::debug!(target: "ai", %url, ?kind, no_think, "AI 请求");
     let mut resp = req.send().await.map_err(|e| format!("AI 请求失败: {e}"))?;
@@ -522,6 +529,7 @@ pub async fn ai_stream(
                 &model,
                 &messages,
                 false,
+                true,
             );
             resp = plain
                 .send()
@@ -721,9 +729,10 @@ mod tests {
     #[test]
     fn body_no_think_params() {
         let msgs = vec![ChatMessage { role: "user".into(), content: "hi".into(), ..Default::default() }];
-        let off = build_body("m", &msgs, false);
+        let off = build_body("m", &msgs, false, true);
         assert!(off.reasoning_effort.is_none());
-        let on = build_body("m", &msgs, true);
+        assert!(off.stream, "流式调用链保持 stream:true");
+        let on = build_body("m", &msgs, true, true);
         assert_eq!(on.reasoning_effort, Some("minimal"));
         assert_eq!(on.enable_thinking, Some(false));
         // serde：noThink=false 时四参数不序列化
@@ -740,14 +749,15 @@ mod tests {
             ChatMessage { role: "system".into(), content: "系统提示".into(), ..Default::default() },
             ChatMessage { role: "user".into(), content: "hi".into(), ..Default::default() },
         ];
-        let rb = build_responses_body("m", &msgs, true);
+        let rb = build_responses_body("m", &msgs, true, true);
         assert_eq!(rb["instructions"], "系统提示");
         assert_eq!(rb["input"][0]["role"], "user");
         assert_eq!(rb["reasoning"]["effort"], "minimal");
-        let rb2 = build_responses_body("m", &msgs, false);
+        let rb2 = build_responses_body("m", &msgs, false, false);
         assert!(rb2.get("reasoning").is_none());
+        assert_eq!(rb2["stream"], false, "非流式构造落 stream:false");
 
-        let ab = build_anthropic_body("m", &msgs);
+        let ab = build_anthropic_body("m", &msgs, true);
         assert_eq!(ab["system"], "系统提示");
         assert_eq!(ab["max_tokens"], 8192);
         assert_eq!(ab["messages"][0]["role"], "user");
@@ -758,16 +768,16 @@ mod tests {
     fn request_urls_by_protocol() {
         let msgs = vec![ChatMessage { role: "user".into(), content: "hi".into(), ..Default::default() }];
         // openai 系直接拼端点路径
-        let (url, _) = build_request(ApiKind::OpenAiChat, "https://api.x.com/v1", None, "m", &msgs, true);
+        let (url, _) = build_request(ApiKind::OpenAiChat, "https://api.x.com/v1", None, "m", &msgs, true, true);
         assert_eq!(url, "https://api.x.com/v1/chat/completions");
-        let (url, _) = build_request(ApiKind::OpenAiResponses, "https://api.x.com/v1", None, "m", &msgs, true);
+        let (url, _) = build_request(ApiKind::OpenAiResponses, "https://api.x.com/v1", None, "m", &msgs, true, true);
         assert_eq!(url, "https://api.x.com/v1/responses");
         // anthropic：base 尾部 /v1 防重复 + 固定 /v1/messages
-        let (url, _) = build_request(ApiKind::Anthropic, "https://api.anthropic.com", None, "m", &msgs, true);
+        let (url, _) = build_request(ApiKind::Anthropic, "https://api.anthropic.com", None, "m", &msgs, true, true);
         assert_eq!(url, "https://api.anthropic.com/v1/messages");
-        let (url, _) = build_request(ApiKind::Anthropic, "https://api.deepseek.com/anthropic", None, "m", &msgs, true);
+        let (url, _) = build_request(ApiKind::Anthropic, "https://api.deepseek.com/anthropic", None, "m", &msgs, true, true);
         assert_eq!(url, "https://api.deepseek.com/anthropic/v1/messages");
-        let (url, _) = build_request(ApiKind::Anthropic, "https://api.x.com/v1/", None, "m", &msgs, true);
+        let (url, _) = build_request(ApiKind::Anthropic, "https://api.x.com/v1/", None, "m", &msgs, true, true);
         assert_eq!(url, "https://api.x.com/v1/messages");
     }
 

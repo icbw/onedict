@@ -17,7 +17,7 @@ import { fetchWebDictDom } from "./fetchDom";
 import { WebdictError } from "./errors";
 import { sanitizeInner } from "./sanitize";
 import { accentFromLabel, speaker } from "./speaker";
-import type { WebDictResult } from "./index";
+import type { WebDictResult, WebDictSense } from "./index";
 
 const HOST = "https://dictionary.cambridge.org";
 
@@ -65,6 +65,8 @@ export async function cambridgeSearch(word: string): Promise<WebDictResult> {
 
   const parts: string[] = [];
   let hit = false;
+  let phonetic: string | undefined;
+  const structuredSenses: WebDictSense[] = [];
 
   for (const entry of entries) {
     const title = getText(entry, ".di-title .hw").trim();
@@ -74,7 +76,7 @@ export async function cambridgeSearch(word: string): Promise<WebDictResult> {
     const pos = getText(entry, ".posgram .pos").trim();
     const gram = getText(entry, ".posgram .gram").trim();
 
-    // 发音（uk/us：region + ipa + mp3）
+    // 发音（uk/us：region + ipa + mp3）；首个 ipa 顺带作为卡面音标
     const prons: Array<{ region: string; ipa: string; url: string | null }> = [];
     entry.querySelectorAll(".dpron-i").forEach(($p) => {
       const region = getText($p, ".dreg").trim();
@@ -88,6 +90,10 @@ export async function cambridgeSearch(word: string): Promise<WebDictResult> {
         url: src ? new URL(src, HOST).toString() : null,
       });
     });
+    if (!phonetic) {
+      const first = prons.map(($p) => $p.ipa).find(Boolean);
+      if (first) phonetic = `/${first}/`;
+    }
 
     // 词头区
     parts.push(
@@ -120,6 +126,27 @@ export async function cambridgeSearch(word: string): Promise<WebDictResult> {
       const trans = Array.from($block.querySelectorAll(".def-body > .trans.dtrans"))
         .map(($t) => ($t.textContent || "").trim())
         .filter(Boolean);
+      // 结构化采集：英文定义 + 中文翻译 + 绑定例句（对译），纯文本
+      const defEn = ($block.querySelector(".ddef_h .ddef_d")?.textContent || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      const definition = trans.join("；");
+      const $ex = $block.querySelector(".def-body .examp.dexamp");
+      const example = ($ex?.querySelector(".eg.deg")?.textContent || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      const exampleZh = ($ex?.querySelector(".trans.dtrans")?.textContent || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (definition || defEn) {
+        structuredSenses.push({
+          pos,
+          definition: definition || defEn,
+          definitionEn: defEn || undefined,
+          example: example || undefined,
+          exampleZh: exampleZh || undefined,
+        });
+      }
       const examples: string[] = [];
       $block.querySelectorAll(".def-body .examp.dexamp").forEach(($ex) => {
         const eg = sanitizeInner(HOST, $ex, ".eg.deg", WORD_LINK_OPTS);
@@ -152,5 +179,12 @@ export async function cambridgeSearch(word: string): Promise<WebDictResult> {
   }
 
   if (!hit) throw new WebdictError("NO_RESULT");
-  return { html: parts.join("") };
+  return {
+    html: parts.join(""),
+    structured: {
+      phonetic,
+      senses: structuredSenses,
+      sentences: [],
+    },
+  };
 }

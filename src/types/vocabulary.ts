@@ -25,6 +25,45 @@ export interface EntrySense {
   definition: string;
 }
 
+/** 一条常用释义（卡面「常用释义」区；Rust vocabulary::card::CardSense） */
+export interface CardSense {
+  /** 词性 / 标签（n. / v. / 网络 …；null = 未标注） */
+  pos: string | null;
+  /** 释义（复用词典内容：O8C 中译 / 剑桥翻译 / 必应中文串 / 有道简明；AI 兜底 = AI 生成） */
+  definition: string;
+  /** 英文定义（O8C / 剑桥等双解源） */
+  definitionEn: string | null;
+  /** 义项绑定例句（O8C 例证 / 剑桥 def-block；词典源） */
+  example: string | null;
+  /** 例句中文对译 */
+  exampleZh: string | null;
+  /** 来源词典 id（"O8C" / "web-cambridge" / "web-bing" / "web-youdao" / "ai"） */
+  source: string | null;
+}
+
+/** 词典独立例句区的例句（原文 + 对译；非义项绑定） */
+export interface CardSentence {
+  en: string;
+  zh: string | null;
+  /** 来源词典 id */
+  source: string | null;
+}
+
+/** 卡面数据：收藏后前端管线整理（词典复用 + AI 兜底；Rust vocabulary::card::EntryCard） */
+export interface EntryCard {
+  /** 常用释义（≤5 条） */
+  senses: CardSense[];
+  /** 词典独立例句（≤3 条） */
+  sentences: CardSentence[];
+  /** 音标（材料可得时） */
+  phonetic: string | null;
+  /** 语境原句的中文对译（无语境 = null；AI 翻译） */
+  sentenceZh: string | null;
+  /** 主来源（"web" 词典复用 / "ai" AI 生成 / "mixed"；v1 旧数据为 "ai"） */
+  source: string;
+  generatedAt: number;
+}
+
 export interface VocabularyEntry {
   id: string;
   /** 用户原样添加的词头（仅 trim/空白归一化） */
@@ -49,6 +88,8 @@ export interface VocabularyEntry {
   context: EntryContext | null;
   /** 主复习词义（无释义收藏 = null，复习回落通用义） */
   sense: EntrySense | null;
+  /** 卡面数据（旧数据 / AI 未配置且词典全空 / 整理失败 = null，卡面降级态） */
+  card: EntryCard | null;
 }
 
 /** 单元来源：手工创建 / 自动聚合 */

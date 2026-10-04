@@ -1,33 +1,28 @@
 /**
  * 学习卡复习弹窗（生词本重构）。
- * 溯源：复习调度（applySm2）与释义渲染（dictFrame）沿用自 pickdict (MIT) 的移植；
+ * 溯源：复习调度（applySm2）沿用自 pickdict (MIT) 的移植；
  * 弹窗与翻牌形态为本仓重构（原 ReviewTab 已删）。
  * 3D 翻牌卡：正面按语境分流（M3）——有语境 = 原句挖空（词形替换 ___，
  * UTF-16 偏移切片，lib/vocabContext 纯函数）+ 读整句按钮（语境记忆优先，
  * 自动发音仍只读词头——句子自动读会盖住回忆思考）；无语境 = 单词大字
- * （零破坏降级）。背面 = 语境义置顶卡（sense 快照 + 来源词典 id + 原句高亮
- * 词形对照，词典移除后快照仍显示）+ 第一部启用词典释义（iframe 沙箱渲染）。
+ * （零破坏降级）。背面 = CardFace 规则化卡面：语境义置顶
+ * （sense 快照 + 原句高亮词形对照）+ 常用释义/例句/对译（entry.card，收藏后
+ * 后台 AI 整理）——词典整页 iframe 退役（第一部词典未收录的词组不再空白），
+ * 「词典中查看」走 onLookup 管道切词典页（Tab keep-alive，复习会话保留）。
  * 四档 SM-2 评分（Space 已翻面时 = 良好），「重来」回队尾重学；←→ 浏览切卡
  * （浏览不评分）；顶部进度条 + n/m。会话队列由父组件按范围组装（全部到期 /
- * 单元到期，dueAt 升序）后经 session 传入，打开时重置会话并缓存启用词典列表
- * （翻面免重复拉取）。
+ * 单元到期，dueAt 升序）后经 session 传入，打开时缓存启用词典列表（发音用）。
  *
- * 发音（追加）：
- * - 背面修复：BOOT_SCRIPT 点 sound:// 回传 `onedict-sound`，本组件此前未监听
- *   （发音按钮点了没反应的根因）——现监听 message（event.source 匹配释义帧，
- *   沙箱 opaque origin 读不到内部 DOM）→ fetchSoundData 取字节（.spx wasm 解码）
- *   → 父页直接 Audio 播放（点击手势在父页链路内，不回传帧）。
- * - 正面发音：单词面无词典 HTML，点按钮按需 lookup（第一部启用词典，结果缓存
- *   htmlRef 供翻面复用）→ 提取第一个 `href="sound://…"` 资源键 → 同链路播放；
- *   帧内取词 / entry:// 内链保持「卡面不查词」——由 DictionaryPanel 的消息
- *   source 校验强制保证（复习卡帧不在词典帧注册表内，其 onedict-word/
- *   onedict-entry 消息被丢弃；原「无监听者天然 no-op」前提不成立——主窗词典 Tab
- *   keep-alive 常驻监听）。
- * - 自动发音：偏好 `reviewAutoPronounce`（设置页词典子页开关，prefs-changed 实时
- *   跟随）开启时卡片出现自动读词；无用户手势的自动播放被 WebView2 拦截时降级提示。
- * - 例句朗读（追加）：背面帧 `say: true`——帧内例句按钮回传 `onedict-speak`，父页按
- *   句子链（Edge 在线 → 本地系统语音）合成播放。例句朗读保持手动点击：句子自动读
- *   会盖住用户回忆词义的思考过程（自动发音只管词头）。
+ * 发音：
+ * - 词头：走朗读源链（本地词典录音 → 在线音频 → 系统语音；设置页「发音」可配）。
+ *   词典资源键惰性取（lookup 第一部启用词典 → firstSoundKey），与卡面渲染无关；
+ *   无 MDD 发音的词由链兜底到系统语音。
+ * - 句子（原句 / 例句）：speakSentence 句子链（Edge 在线 → 本地系统语音）+
+ *   voice-cache write-through；朗读保持手动点击（自动读句会盖住回忆思考）。
+ * - 自动发音：偏好 `reviewAutoPronounce` 开启时卡片出现自动读词；无用户手势的
+ *   自动播放被 WebView2 拦截时降级提示。
+ * - 卡面整理（vocabulary-card 事件）：收藏后后台管线完成时回灌队列内同词条，
+ *   复习中看到卡面即时就绪。
  */
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -47,17 +42,16 @@ import {
   DialogTitle,
 } from "@onedict/ui/components/dialog";
 import { cn } from "../../lib/utils";
-import { maskSentence, sentenceHighlight } from "../../lib/vocabContext";
+import { aiReady } from "../../lib/aiConfig";
+import { maskSentence } from "../../lib/vocabContext";
 import { applySm2, type ReviewGrade } from "../../services/sm2";
-import { buildSrcdoc } from "../../services/dictFrame";
-import { fetchSoundData } from "../../services/dictSound";
-import { playSoundData, stopSpeaking } from "../../services/tts";
+import { stopSpeaking } from "../../services/tts";
 import { firstSoundKey, speakSentence, speakWord } from "../../services/pronounce";
 import { prefetchVoiceAudio } from "../../services/voicePrefetch";
-import { sayButtonsOf } from "../../services/voiceRouter";
 import type { DictMeta, LookupResult } from "../../types/dictionary";
 import type { PrefsPayload, PronouncePrefs } from "../../types/prefs";
 import type { VocabularyEntry } from "../../types/vocabulary";
+import CardFace from "./CardFace";
 
 /** 会话类型：轮次复习（记单元轮次）/ 抽查（记抽查记录）/ 专项（不确定词，仅练习） */
 export type SessionKind = "round" | "check" | "focus";
@@ -116,6 +110,7 @@ export default function ReviewDialog({
   onClose,
   onComplete,
   onFocusAgain,
+  onLookup,
 }: {
   session: ReviewSession | null;
   onClose: () => void;
@@ -123,12 +118,13 @@ export default function ReviewDialog({
   onComplete?: (summary: SessionSummary) => void;
   /** 完成态「再来一轮（不确定词）」——父组件用同单元的不确定词重建会话 */
   onFocusAgain?: () => void;
+  /** 卡面「词典中查看」：切词典页查词（MainApp lookupReq 管道，不关会话） */
+  onLookup?: (word: string) => void;
 }) {
   const open = session !== null;
   const [queue, setQueue] = useState<VocabularyEntry[]>([]);
   const [index, setIndex] = useState(0);
   const [revealed, setRevealed] = useState(false);
-  const [html, setHtml] = useState<string | null>(null);
   const [reviewedCount, setReviewedCount] = useState(0);
   /** 四档评分次数（完成态展示 + 轮次记录同源） */
   const [gradeCounts, setGradeCounts] = useState<Record<ReviewGrade, number>>({
@@ -142,11 +138,8 @@ export default function ReviewDialog({
   const missedWordsRef = useRef(new Set<string>());
   /** 完成回调只触发一次（队列清空后 effect 可能重跑） */
   const completedRef = useRef(false);
-  const revealSeq = useRef(0);
   const dictsRef = useRef<DictMeta[]>([]);
-  /** 背面释义 iframe（event.source 匹配出发帧，sound:// 消息只认它） */
-  const iframeRef = useRef<HTMLIFrameElement | null>(null);
-  /** 当前卡释义 html 缓存（正面发音复用翻面的 lookup，免二次查询） */
+  /** 当前卡词典词条 html 缓存（发音资源键惰性取，免二次查询） */
   const htmlRef = useRef<string | null>(null);
   /** 发音请求 token（切卡后丢弃在途播放，防止上一张卡的音串场） */
   const speakSeq = useRef(0);
@@ -155,6 +148,8 @@ export default function ReviewDialog({
   const [autoPronounce, setAutoPronounce] = useState(false);
   /** 发音偏好（朗读源链 / 语音 / 语速；null = 未读到，发音按钮给提示） */
   const [pronounce, setPronounce] = useState<PronouncePrefs | null>(null);
+  /** AI 配置就绪（卡面降级态文案分流；prefs-changed 实时跟随） */
+  const [aiConfigReady, setAiConfigReady] = useState(false);
   /** 启用词典缓存就绪标记（打开会话后 dictionary_list 异步返回置位——
    *  首张卡自动发音必须等它：effect 跑得比 IPC 快，词典未就绪会静默退出） */
   const [dictsReady, setDictsReady] = useState(false);
@@ -166,6 +161,7 @@ export default function ReviewDialog({
         .then((p) => {
           setAutoPronounce(p.reviewAutoPronounce ?? false);
           setPronounce(p.pronounce ?? null);
+          setAiConfigReady(aiReady(p.ai));
         })
         .catch(() => {});
     };
@@ -176,19 +172,17 @@ export default function ReviewDialog({
     };
   }, []);
 
-  // 打开会话：重置状态 + 缓存启用词典（翻面查释义用；会话中不重复拉取）
+  // 打开会话：重置状态 + 缓存启用词典（发音资源键用；会话中不重复拉取）
   useEffect(() => {
     if (!session) return;
     setQueue(session.queue);
     setIndex(0);
     setRevealed(false);
-    setHtml(null);
     setReviewedCount(0);
     setGradeCounts({ again: 0, hard: 0, good: 0, easy: 0 });
     againWordsRef.current = new Set();
     missedWordsRef.current = new Set();
     completedRef.current = false;
-    revealSeq.current++;
     speakSeq.current++;
     htmlRef.current = null;
     setSoundHint(null);
@@ -203,6 +197,18 @@ export default function ReviewDialog({
         setDictsReady(true); // 失败也置位（卡面可翻，发音按钮会给出提示）
       });
   }, [session]);
+
+  // 卡面整理完成（收藏后后台管线）：队列内同词条回灌——复习中看到卡面即时就绪
+  useEffect(() => {
+    if (!open) return;
+    const un = listen<VocabularyEntry>("vocabulary-card", (e) => {
+      const updated = e.payload;
+      setQueue((q) => q.map((c) => (c.id === updated.id ? updated : c)));
+    });
+    return () => {
+      void un.then((f) => f(), () => {});
+    };
+  }, [open]);
 
   const current = queue[index];
   const done = index >= queue.length;
@@ -234,16 +240,6 @@ export default function ReviewDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅在队列清空瞬间触发一次
   }, [open, done, session]);
 
-  // 播放（父页 Audio：正面按钮与自动发音无用户手势链路；被拦截时提示重试）。
-  // 统一走 services/tts 的单通道播放器——词典资源音频与系统语音合成共用一条通道，
-  // 自动发音与手动按钮、背面喇叭并发时不叠音。
-  const playBase64 = (mime: string, base64: string) => {
-    stopSpeaking();
-    void playSoundData({ mime, base64 }).catch((err) => {
-      setSoundHint(err instanceof Error ? err.message : String(err));
-    });
-  };
-
   // 关窗即停（发音不比窗口活得久）
   useEffect(() => {
     if (open) return;
@@ -251,7 +247,7 @@ export default function ReviewDialog({
   }, [open]);
 
   // 发音：走朗读源链（本地词典录音 → 在线音频 → 系统语音；设置页「发音」可配）。
-  // 词典资源键惰性取——翻过面直接用缓存 HTML，未翻面才 lookup（第一部启用词典）；
+  // 词典资源键惰性取——lookup（第一部启用词典）后缓存，同卡复用免二次查询；
   // 无 MDD 发音的词由链兜底到系统语音（此前直接提示「未收录」）。
   const speak = async () => {
     const card = queue[index];
@@ -291,26 +287,32 @@ export default function ReviewDialog({
     }
   };
 
-  // 语境卡正面发音：读整句（speakSentence 句子链 edge → tts；语境记忆优先），
-  // 而非读词——正面挖空要回忆的就是词形，读词等于泄底。无语境回落读词（speak）。
-  // 自动发音偏好仍只管词头（M1 决策：句子自动读会盖住回忆思考）。
-  const speakContext = async () => {
-    const card = queue[index];
-    const sentence = card?.context?.sentence?.trim();
-    if (!sentence) {
-      void speak();
-      return;
-    }
+  // 句子朗读（句子合成链 edge → tts + voice-cache write-through）：语境原句与
+  // 卡面例句共用。朗读保持手动点击（自动读句会盖住回忆思考）。
+  const speakSentenceText = async (text: string) => {
     const prefs = pronounce;
     if (!prefs) {
       setSoundHint("发音配置尚未就绪，请稍候再试");
       return;
     }
     try {
-      await speakSentence(sentence, prefs, (h) => setSoundHint(h?.text ?? null));
+      await speakSentence(text, prefs, (h) => setSoundHint(h?.text ?? null));
     } catch (err) {
       setSoundHint(err instanceof Error ? err.message : String(err));
     }
+  };
+
+  // 语境卡正面发音：读整句（语境记忆优先），而非读词——正面挖空要回忆的就是
+  // 词形，读词等于泄底。无语境回落读词（speak）。自动发音偏好仍只管词头
+  // （M1 决策：句子自动读会盖住回忆思考）。
+  const speakContext = () => {
+    const card = queue[index];
+    const sentence = card?.context?.sentence?.trim();
+    if (!sentence) {
+      void speak();
+      return;
+    }
+    void speakSentenceText(sentence);
   };
 
   // 自动发音：卡片出现（含浏览切卡、「重来」回队尾重现）即读词；
@@ -322,29 +324,17 @@ export default function ReviewDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 闭包经 deps 覆盖刷新（current.id 变化即新卡）
   }, [open, done, autoPronounce, current?.id, dictsReady]);
 
-  // 翻面：第一部启用词典查词渲染（递增 token 使进行中的渲染结果失效）
-  const reveal = async () => {
+  // 翻面：卡面规则化渲染（语境义与卡面数据都在 entry 上，无需查词典）——翻面零延迟
+  const reveal = () => {
     if (!current) return;
-    const seq = ++revealSeq.current;
     setRevealed(true);
-    setHtml(null);
-    if (dictsRef.current.length === 0) return;
-    const result = await invoke<LookupResult>("dictionary_lookup", {
-      dictId: dictsRef.current[0].id,
-      word: current.word,
-    });
-    if (revealSeq.current !== seq) return;
-    setHtml(result.html);
-    htmlRef.current = result.html;
   };
 
-  // 换卡公共清理：翻面态/释义/发音缓存与在途播放全部失效
+  // 换卡公共清理：翻面态/发音缓存与在途播放全部失效
   const resetCard = () => {
-    revealSeq.current++;
     speakSeq.current++;
     stopSpeaking();
     setRevealed(false);
-    setHtml(null);
     htmlRef.current = null;
     setSoundHint(null);
   };
@@ -376,47 +366,6 @@ export default function ReviewDialog({
     resetCard();
     setIndex((i) => Math.min(Math.max(i + delta, 0), queue.length - 1));
   };
-
-  // 背面发音：iframe 内点 sound:// → BOOT_SCRIPT 回传 onedict-sound → 此处取字节
-  // 直接父页播放（此前未监听该消息 = 「发音按钮没反应」的根因）。
-  // 背面例句朗读：帧内例句按钮回传 onedict-speak → 句子链（Edge 在线 → 本地系统语音）
-  // 父页合成播放——复习卡查词走第一部启用词典，例句无词典录音，合成朗读是唯一
-  // 发音来源（依赖 pronounce 就绪；deps 随动，否则闭包读到旧 null）。
-  useEffect(() => {
-    const onMessage = (e: MessageEvent) => {
-      const d = e.data as { type?: string; key?: string; text?: string; which?: string } | null;
-      if (!d || typeof d.type !== "string") return;
-      if (iframeRef.current && e.source !== iframeRef.current.contentWindow) return;
-      if (d.type === "onedict-sound") {
-        if (typeof d.key !== "string" || !d.key) return;
-        const dictId = dictsRef.current[0]?.id;
-        if (!dictId) return;
-        setSoundHint("发音获取中…");
-        fetchSoundData(dictId, d.key)
-          .then((data) => {
-            setSoundHint(null);
-            playBase64(data.mime, data.base64);
-          })
-          .catch((err) => {
-            setSoundHint(err instanceof Error ? err.message : String(err));
-          });
-      } else if (d.type === "onedict-speak") {
-        const sayText = typeof d.text === "string" ? d.text.trim() : "";
-        if (!sayText || !pronounce) return;
-        const button = sayButtonsOf(pronounce)[d.which === "b" ? 1 : 0];
-        void speakSentence(
-          sayText,
-          pronounce,
-          (h) => setSoundHint(h?.text ?? null),
-          button,
-        ).catch((err) => {
-          setSoundHint(err instanceof Error ? err.message : String(err));
-        });
-      }
-    };
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, [pronounce]);
 
   // 键盘：Space 翻面/良好、1-4 评分（翻面后）、←→ 浏览；Esc 关闭由 Dialog 自带
   useEffect(() => {
@@ -586,67 +535,19 @@ export default function ReviewDialog({
                     )}
                   </div>
 
-                  {/* 背面：语境义置顶卡（sense 快照 + 原句高亮词形对照）+ 释义帧
-                      （iframe 沙箱，白底；帧内发音按钮经 onedict-sound 消息播放） */}
+                  {/* 背面：规则化卡面（语境义主位 + 常用释义 + 对译展开；
+                      卡面数据缺失走降级态——语境义与原句不受影响） */}
                   <div className="absolute inset-0 flex flex-col overflow-hidden rounded-2xl border border-border bg-white [backface-visibility:hidden] [transform:rotateY(180deg)]">
-                    {(current.sense || current.context?.sentence) && (
-                      <div className="flex shrink-0 flex-col gap-1 border-b border-border-subtle px-4 py-2.5 text-left">
-                        {current.sense && (
-                          <div className="flex items-baseline gap-2">
-                            <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 font-medium text-[10px] text-primary">
-                              语境义 · {current.sense.dictId}
-                            </span>
-                            <span className="line-clamp-3 min-w-0 flex-1 text-sm leading-snug">
-                              {current.sense.definition}
-                            </span>
-                          </div>
-                        )}
-                        {current.context?.sentence &&
-                          (() => {
-                            const hl = sentenceHighlight(
-                              current.context.sentence,
-                              current.context.wordOffset,
-                            );
-                            return (
-                              <p className="text-muted-foreground text-xs leading-relaxed break-words">
-                                {hl ? (
-                                  <>
-                                    {hl.before}
-                                    <span className="rounded bg-amber-500/25 px-0.5 font-medium text-foreground">
-                                      {hl.hit}
-                                    </span>
-                                    {hl.after}
-                                  </>
-                                ) : (
-                                  current.context.sentence
-                                )}
-                              </p>
-                            );
-                          })()}
-                      </div>
-                    )}
-                    <div className="min-h-0 flex-1">
-                      {html ? (
-                        <iframe
-                          ref={iframeRef}
-                          title={`review-card-${current.id}`}
-                          sandbox="allow-scripts"
-                          // allow="autoplay"：卡面发音在帧内 new Audio(...).play()，沙箱帧
-                          // 是 opaque origin ⇒ 缺这条会被权限策略拒（NotAllowedError）
-                          allow="autoplay"
-                          // say:true —— 帧内例句朗读按钮经 onedict-speak 回传，父页按
-                          // 句子链（Edge 在线 → 本地系统语音）合成播放（上方 message 监听）
-                          // sense:false —— 宿主不接 onedict-sense，拖选不浮收藏工具条
-                          //（卡面语义是回忆不是收藏；同 onedict-word 一样被 source 校验拒收）
-                          srcDoc={buildSrcdoc(html, undefined, { say: true, sense: false })}
-                          className="block h-full w-full border-0 bg-white"
-                        />
-                      ) : (
-                        <div className="flex h-full items-center justify-center text-foreground-tertiary text-sm">
-                          该词未被词典收录
-                        </div>
-                      )}
-                    </div>
+                    <CardFace
+                      entry={current}
+                      aiReady={aiConfigReady}
+                      onSpeakWord={() => void speak()}
+                      onSpeakSentence={(text) => void speakSentenceText(text)}
+                      onRetry={() =>
+                        void invoke("vocabulary_card_generate", { id: current.id }).catch(() => {})
+                      }
+                      onLookup={(word) => onLookup?.(word)}
+                    />
                   </div>
                 </div>
               </div>

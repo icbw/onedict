@@ -143,8 +143,17 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
     refresh();
     // 生词本任何变更（加词/删除/移动/评分/分组/轮次）→ 刷新
     const unlisten = listen("vocabulary-changed", () => refresh());
+    // 卡面整理完成（收藏后后台管线）→ 单条目回灌（不整表刷新；entries 常新，
+    // 复习会话组装即带卡面）
+    const unCard = listen<VocabularyEntry>("vocabulary-card", (e) => {
+      const updated = e.payload;
+      setEntries(
+        (list) => list?.map((c) => (c.id === updated.id ? updated : c)) ?? list,
+      );
+    });
     return () => {
       void unlisten.then((f) => f(), () => {});
+      void unCard.then((f) => f(), () => {});
     };
   }, [refresh]);
 
@@ -880,6 +889,7 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
         session={session}
         onClose={() => setSession(null)}
         onComplete={handleComplete}
+        onLookup={onLookup}
         onFocusAgain={
           session?.unit
             ? () => {

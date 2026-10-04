@@ -13,9 +13,25 @@ import { fetchWebDictDom } from "./fetchDom";
 import { WebdictError } from "./errors";
 import { sanitizeInner } from "./sanitize";
 import { accentFromLabel, speaker } from "./speaker";
-import type { WebDictResult } from "./index";
+import type { WebDictResult, WebDictSense } from "./index";
 
 const HOST = "https://dict.youdao.com";
+
+/** 简明释义条目的词性前缀（「n. 残骸」/「adj. 可疑的」）；网络释义、
+ *  人名标注（【名】…人名）条目不进结构化释义 */
+const POS_PREFIX = /^(n|v|vi|vt|adj|adv|prep|conj|pron|art|num|interj|int|aux|abbr|pl)\.\s*/i;
+
+/** youdao 简明释义条目 → 结构化释义：词性前缀拆分 + 人名条目过滤 */
+function senseFromLi(text: string): WebDictSense | null {
+  const s = text.replace(/\s+/g, " ").trim();
+  if (!s || s.includes("人名")) return null;
+  const m = POS_PREFIX.exec(s);
+  if (m) {
+    const definition = s.slice(m[0].length).trim();
+    return definition ? { pos: m[1].toLowerCase() + ".", definition } : null;
+  }
+  return { pos: "", definition: s };
+}
 
 /** 星级路径（saladict youdao/engine.ts 同款自绘 5 星） */
 const STAR_PATH =
@@ -94,6 +110,15 @@ export async function youdaoSearch(word: string): Promise<WebDictResult> {
 
   // ── 分区采集（消毒在 sanitizeInner 出口做；词查询链接出口改写 entry:// 内链） ──
   const basic = sanitizeInner(HOST, doc, "#phrsListTab .trans-container", WORD_LINK_OPTS);
+
+  // 结构化采集：简明释义逐条（ul > li 纯文本，「n. 残骸，碎片」形态）
+  const structuredSenses: WebDictSense[] = [];
+  doc.querySelectorAll("#phrsListTab .trans-container li").forEach(($li) => {
+    const sense = senseFromLi($li.textContent || "");
+    if (sense) structuredSenses.push(sense);
+  });
+  // 音标：首个发音标注（phsym 形如「英 [ˈdebriː]」——抽 [] 内容）
+  const phoneticMatch = /\[([^\]]+)\]/.exec(prons[0]?.phsym ?? "");
 
   const collins: Array<{ title: string; content: string }> = [];
   doc.querySelectorAll("#collinsResult .wt-container").forEach(($container) => {
@@ -178,5 +203,12 @@ export async function youdaoSearch(word: string): Promise<WebDictResult> {
       `<div class="webdict-box"><div class="webdict-box-title">权威例句</div><ol class="dictYoudao-Sentence">${sentence}</ol></div>`,
     );
   }
-  return { html: parts.join("") };
+  return {
+    html: parts.join(""),
+    structured: {
+      phonetic: phoneticMatch?.[1],
+      senses: structuredSenses,
+      sentences: [],
+    },
+  };
 }

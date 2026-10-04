@@ -19,7 +19,7 @@ import { fetchWebDictDom } from "./fetchDom";
 import { WebdictError } from "./errors";
 import { sanitizeInner } from "./sanitize";
 import { accentFromLabel, speaker } from "./speaker";
-import type { WebDictResult } from "./index";
+import type { WebDictResult, WebDictSense, WebDictSentence } from "./index";
 
 const HOST = "https://cn.bing.com";
 
@@ -132,13 +132,22 @@ export async function bingSearch(word: string): Promise<WebDictResult> {
 
   // ── 释义区（可见面板：英汉 + 网络；隐藏面板同名结构，取文档序第一个容器） ──
   const defs: Array<{ pos: string; html: string }> = [];
+  const structuredSenses: WebDictSense[] = [];
   const $container = doc.querySelector(".client_def_container");
   $container?.querySelectorAll(".client_def_bar").forEach(($bar) => {
     const $list = $bar.querySelector(".client_def_list");
     if (!$list) return;
     shapeDefList(doc, $list);
+    const pos = collapse(getText($bar, ".client_def_title_bar"));
+    // 结构化采集：逐条释义为纯文本串（「碎片；残骸；破片」），词性同源
+    $list.querySelectorAll(".client_def_list_item").forEach(($item) => {
+      const definition = collapse(
+        $item.querySelector(".client_def_list_word_content")?.textContent ?? "",
+      );
+      if (definition) structuredSenses.push({ pos, definition });
+    });
     const html = sanitizeInner(HOST, $list, undefined, WORD_LINK_OPTS);
-    if (html) defs.push({ pos: collapse(getText($bar, ".client_def_title_bar")), html });
+    if (html) defs.push({ pos, html });
   });
 
   // ── 词形变化（title = 形态名，data-word = 可查词形） ──
@@ -149,10 +158,15 @@ export async function bingSearch(word: string): Promise<WebDictResult> {
   });
 
   // ── 例句（原文 + 译文 + 来源 + 发音） ──
+  const structuredSentences: WebDictSentence[] = [];
   const sentences: Array<{ en: string; cn: string; source: string; mp3: string | null }> = [];
   for (const $item of Array.from(doc.querySelectorAll(".client_sentence_list"))) {
     if (sentences.length >= SENTENCE_LIMIT) break;
     shapeSentence(doc, $item);
+    // 结构化采集：整形后（锚点已展开）取纯文本，再 sanitize 出 HTML 分区
+    const enText = collapse($item.querySelector(".client_sen_en")?.textContent ?? "");
+    const cnText = collapse($item.querySelector(".client_sen_cn")?.textContent ?? "");
+    if (enText || cnText) structuredSentences.push({ en: enText, cn: cnText });
     const en = sanitizeInner(HOST, $item, ".client_sen_en");
     const cn = sanitizeInner(HOST, $item, ".client_sen_cn");
     if (!en && !cn) continue;
@@ -163,6 +177,9 @@ export async function bingSearch(word: string): Promise<WebDictResult> {
       mp3: bingAudioUrl($item),
     });
   }
+
+  // 音标：发音标签「英 [breɪz] 美 …」形态抽首个 [] 内容
+  const phoneticMatch = /\[([^\]]+)\]/.exec(prons[0]?.label ?? "");
 
   // 命中判定：空态页无标题亦无释义（英英面板不采集）
   if (!title && defs.length === 0) throw new WebdictError("NO_RESULT");
@@ -231,5 +248,12 @@ export async function bingSearch(word: string): Promise<WebDictResult> {
         `</ol></div>`,
     );
   }
-  return { html: parts.join("") };
+  return {
+    html: parts.join(""),
+    structured: {
+      phonetic: phoneticMatch?.[1],
+      senses: structuredSenses,
+      sentences: structuredSentences,
+    },
+  };
 }
