@@ -15,6 +15,7 @@ import {
   History,
   Languages,
   Settings,
+  SpellCheck,
 } from "lucide-react";
 import { Tooltip } from "@onedict/ui/components/tooltip";
 import { cn } from "../lib/utils";
@@ -24,9 +25,10 @@ import DictionaryTab from "./DictionaryTab";
 import VocabularyTab from "./VocabularyTab";
 import TranslateTab from "./TranslateTab";
 import HistoryTab from "./HistoryTab";
+import CheckTab from "./CheckTab";
 import SettingsTab from "./SettingsTab";
 
-type Tab = "dictionary" | "vocabulary" | "translate" | "history" | "settings";
+type Tab = "dictionary" | "vocabulary" | "translate" | "history" | "check" | "settings";
 
 /** 生词本→词典页的查词请求（seq 递增保证同词重复点击也触发） */
 export interface LookupRequest {
@@ -84,6 +86,12 @@ export default function MainApp() {
           active={tab === "history"}
           onClick={() => setTab("history")}
         />
+        <NavBtn
+          icon={SpellCheck}
+          label="检查"
+          active={tab === "check"}
+          onClick={() => setTab("check")}
+        />
         <div className="flex-1" />
         <NavBtn
           icon={Settings}
@@ -110,6 +118,9 @@ export default function MainApp() {
         </div>
         <div className={tab === "history" ? "h-full" : "hidden"}>
           <HistoryTab onLookup={openLookup} />
+        </div>
+        <div className={tab === "check" ? "h-full" : "hidden"}>
+          <CheckTab />
         </div>
         <div className={tab === "settings" ? "h-full" : "hidden"}>
           <SettingsTab active={tab === "settings"} />

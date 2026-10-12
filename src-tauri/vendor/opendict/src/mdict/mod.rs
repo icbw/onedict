@@ -103,6 +103,18 @@ impl MdictDictionary {
         &self.mdx.header.style_sheet
     }
 
+    /// onedict 本地改造：词头存在性判定——仅走 key 索引二分，不解压记录块
+    /// （拼写检查对每个候选词探针一次，lookup_raw 的取记录开销是纯浪费）；
+    /// 大小写语义与 `lookup` 一致。
+    pub fn has_word(&self, word: &str) -> bool {
+        let lookup_key = if self.case_sensitive {
+            word.to_string()
+        } else {
+            word.to_lowercase()
+        };
+        self.mdx.has_key(&lookup_key)
+    }
+
     /// Look up a resource (CSS, image, font, etc.) from .mdd files.
     /// Path should match the MDD keyword format, e.g. `\style.css` or `/style.css`.
     pub fn lookup_resource(&self, path: &str) -> Option<Vec<u8>> {

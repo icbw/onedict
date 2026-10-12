@@ -87,8 +87,12 @@ export default function CardFace({
     (!!card.sentenceZh ||
       card.senses.some((s) => s.exampleZh) ||
       card.sentences.some((s) => s.zh));
-  /** AI 兜底条目存在才在底部标注（AI 内容须明确标注） */
-  const hasAiContent = !!card && (card.senses.some((s) => s.source === "ai") || card.source === "ai");
+  /** AI 兜底条目存在才在底部标注（AI 内容须明确标注；覆盖释义与例句两区） */
+  const hasAiContent =
+    !!card &&
+    (card.senses.some((s) => s.source === "ai") ||
+      card.sentences.some((s) => s.source === "ai") ||
+      card.source === "ai");
 
   return (
     <div className="flex h-full flex-col overflow-hidden px-5 py-3 text-left select-text">
@@ -195,15 +199,22 @@ export default function CardFace({
                     <p className="min-w-0 flex-1 text-muted-foreground text-xs leading-relaxed break-words">
                       {s.en}
                     </p>
-                    <button
-                      type="button"
-                      title="朗读例句"
-                      aria-label="朗读例句"
-                      onClick={() => onSpeakSentence(s.en)}
-                      className="shrink-0 rounded p-0.5 text-muted-foreground/50 transition-colors hover:text-primary"
-                    >
-                      <Volume2 className="size-3" />
-                    </button>
+                    <span className="flex shrink-0 items-center gap-1">
+                      {s.source && (
+                        <span className="text-muted-foreground/50 text-[10px]">
+                          {sourceLabel(s.source)}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        title="朗读例句"
+                        aria-label="朗读例句"
+                        onClick={() => onSpeakSentence(s.en)}
+                        className="shrink-0 rounded p-0.5 text-muted-foreground/50 transition-colors hover:text-primary"
+                      >
+                        <Volume2 className="size-3" />
+                      </button>
+                    </span>
                   </div>
                   {showZh && s.zh && (
                     <p className="pl-4 text-muted-foreground/60 text-xs leading-relaxed break-words">

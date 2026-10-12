@@ -245,6 +245,22 @@ impl MdictFile {
         if result.last() == Some(&0) { result.pop(); }
         Ok(Some(result))
     }
+
+    /// Existence check on the key index only, without fetching or
+    /// decompressing any record block (onedict local addition: spell-check
+    /// probe hits this per candidate word, so lookup_raw's block work would
+    /// be pure waste; upstream has no equivalent).
+    pub fn has_key(&self, key: &str) -> bool {
+        self.sorted_indices
+            .binary_search_by(|&idx| {
+                if self.case_sensitive {
+                    self.keywords[idx].as_str().cmp(key)
+                } else {
+                    self.keywords[idx].to_lowercase().as_str().cmp(key)
+                }
+            })
+            .is_ok()
+    }
 }
 
 /// 解析文件头并应用空 Encoding 兜底（MDD 通常为 UTF-16LE）。

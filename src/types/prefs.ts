@@ -145,6 +145,9 @@ export interface PrefsPayload {
   webExternal: boolean;
   /** 学习卡出现时自动发音（关闭仍可点卡面发音按钮手动发音） */
   reviewAutoPronounce: boolean;
+  /** 生词卡 AI 兜底例句（默认关）：词典例句区为空时由 AI 生成例句补位
+   *  （source="ai"，卡面标注含 AI 兜底）；仅卡面整理管线消费 */
+  vocabAiExampleFallback: boolean;
   /** 划词触发方式：selected = 拖选/双击即查（默认）/ ctrlkey = 按住 Ctrl /
    *  shortcut = 快捷键（hotkeys.triggerLookup 槽位） */
   selectionTrigger: "selected" | "ctrlkey" | "shortcut";

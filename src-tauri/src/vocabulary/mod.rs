@@ -711,6 +711,47 @@ impl VocabularyStore {
         })
     }
 
+    /// 写入/清除收词语境（None = 清除）。句子文本变化时连带清 card.sentenceZh
+    /// （对译派生自原句，句子变了即失效）；偏移相对新句越界/颠倒置 None——
+    /// 编辑后的句子不再保证含原选区词，在源头收口（前端 maskSentence 防御兜底）。
+    pub fn set_context(
+        &self,
+        id: &str,
+        context: Option<EntryContext>,
+    ) -> Result<Option<VocabularyEntry>, String> {
+        self.with(|s| {
+            match s.entries.iter_mut().find(|e| e.id == id) {
+                Some(entry) => {
+                    let sentence_changed = match (&entry.context, &context) {
+                        (Some(old), Some(new)) => old.sentence != new.sentence,
+                        (None, Some(_)) => true,
+                        _ => false,
+                    };
+                    let context = context.map(sanitize_context).map(|mut ctx| {
+                        if let Some(offset) = ctx.word_offset {
+                            let len = ctx.sentence.encode_utf16().count() as u32;
+                            if offset[0] >= offset[1] || offset[1] > len {
+                                ctx.word_offset = None;
+                            }
+                        }
+                        ctx
+                    });
+                    let drop_zh = context.is_none() || sentence_changed;
+                    entry.context = context;
+                    if drop_zh {
+                        if let Some(card) = entry.card.as_mut() {
+                            card.sentence_zh = None;
+                        }
+                    }
+                    let updated = entry.clone();
+                    s.persist();
+                    Some(updated)
+                }
+                None => None,
+            }
+        })
+    }
+
     pub fn add(
         &self,
         word: &str,
@@ -846,6 +887,23 @@ pub fn vocabulary_card_set(
         .ok_or_else(|| "词条不存在".to_string())?;
     broadcast_change(&app);
     card::broadcast_entry(&app, &updated);
+    Ok(updated)
+}
+
+/// 写入/清除收词语境（隐私收口：语境可能含敏感内容，用户须可删）。
+/// Some = 编辑（清洗 + 偏移有效性防御），None = 清除（连带清 card.sentenceZh）。
+/// 广播 vocabulary-changed 全量刷新（低频操作，全量拉取成本可忽略）。
+#[tauri::command]
+pub fn vocabulary_context_set(
+    store: tauri::State<'_, VocabularyStore>,
+    app: tauri::AppHandle,
+    id: String,
+    context: Option<EntryContext>,
+) -> Result<VocabularyEntry, String> {
+    let updated = store
+        .set_context(&id, context)?
+        .ok_or_else(|| "词条不存在".to_string())?;
+    broadcast_change(&app);
     Ok(updated)
 }
 
@@ -1221,6 +1279,63 @@ mod tests {
 
         // 不存在的 id：静默 None
         assert!(store.set_card("no-such-id", card).unwrap().is_none());
+    }
+
+    #[test]
+    fn set_context_edit_clear_and_side_effects() {
+        let dir = temp_dir("set-context");
+        let store = VocabularyStore::open(&dir);
+        let ctx = sample_context();
+        let entry = store.add("quick", 1, Some(ctx.clone()), None).unwrap().entry;
+        let with_zh = card::EntryCard {
+            sentence_zh: Some("那只敏捷的棕色狐狸跳了过去。".into()),
+            ..Default::default()
+        };
+        store.set_card(&entry.id, with_zh.clone()).unwrap().unwrap();
+
+        // 原句未变的更新：sentenceZh 保留、有效偏移保留
+        let mut same_sentence = ctx.clone();
+        same_sentence.source_app = Some("notepad.exe".into());
+        let updated = store
+            .set_context(&entry.id, Some(same_sentence.clone()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated.card.as_ref().unwrap().sentence_zh,
+            Some("那只敏捷的棕色狐狸跳了过去。".into())
+        );
+        assert_eq!(updated.context.as_ref().unwrap().word_offset, Some([4, 9]));
+
+        // 原句变化：sentenceZh 连带清除；偏移越界（新句仅 3 字符）置 None
+        let shortened = EntryContext {
+            sentence: "abc".into(),
+            word_offset: Some([4, 9]),
+            ..Default::default()
+        };
+        let updated = store.set_context(&entry.id, Some(shortened.clone())).unwrap().unwrap();
+        assert!(updated.card.as_ref().unwrap().sentence_zh.is_none());
+        assert!(updated.context.as_ref().unwrap().word_offset.is_none());
+
+        // 偏移颠倒同样置 None（[0] >= [1]）
+        let inverted = EntryContext {
+            sentence: "hello world".into(),
+            word_offset: Some([6, 6]),
+            ..Default::default()
+        };
+        let updated = store.set_context(&entry.id, Some(inverted)).unwrap().unwrap();
+        assert!(updated.context.as_ref().unwrap().word_offset.is_none());
+
+        // 清除：context 与 sentenceZh 一并消失（隐私残留），sense 不受影响
+        store.set_card(&entry.id, with_zh).unwrap().unwrap();
+        let updated = store.set_context(&entry.id, None).unwrap().unwrap();
+        assert!(updated.context.is_none());
+        assert!(updated.card.as_ref().unwrap().sentence_zh.is_none());
+
+        // 重启后清除仍生效（roundtrip）；不存在的 id 静默 None
+        let store = VocabularyStore::open(&dir);
+        let reloaded = store.entry(&entry.id).unwrap().unwrap();
+        assert!(reloaded.context.is_none());
+        assert!(store.set_context("no-such-id", None).unwrap().is_none());
     }
 
     #[test]

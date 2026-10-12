@@ -30,10 +30,11 @@ import {
   mergeSenses,
   mergeSentences,
   parseAiSenses,
+  parseAiSentences,
   type SenseGroup,
 } from "../lib/vocabCardCore";
 import type { PrefsPayload } from "../types/prefs";
-import type { CardSense, EntryCard, VocabularyEntry } from "../types/vocabulary";
+import type { CardSense, CardSentence, EntryCard, VocabularyEntry } from "../types/vocabulary";
 
 /** 卡面请求（Rust vocabulary-card-request payload；与 Rust CardRequest 对齐） */
 interface CardRequest {
@@ -204,6 +205,28 @@ async function aiFallbackSenses(
   return parseAiSenses(response);
 }
 
+/** 词典例句区为空时的 AI 兜底例句（偏好开关默认关；source="ai" 进独立例句区） */
+async function aiFallbackSentences(
+  word: string,
+  prefs: PrefsPayload,
+  signal?: AbortSignal,
+): Promise<CardSentence[]> {
+  const response = await streamChat(
+    [
+      {
+        role: "system",
+        content:
+          '你是双语词典编辑。为词条写 1-3 条自然地道的英文例句（词条词形原样出现），并给出中文翻译。只输出一个 JSON 对象：\n{"sentences":[{"en":"英文例句(不超过25词)","zh":"例句中文翻译"}]}\n规则：例句贴近日常真实使用，不造作；严格只输出 JSON 本身。',
+      },
+      { role: "user", content: `词条：${word}` },
+    ],
+    { noThink: true },
+    signal,
+    () => {},
+  );
+  return parseAiSentences(response);
+}
+
 // ── 管线主体 ──
 
 /** 组装一张卡面（词典复用 + AI 兜底 + 原句对译）。返回 null = 无内容可写
@@ -220,7 +243,7 @@ async function buildCard(
   ]);
   const groups = [...localGroups, ...webGroups];
   let senses = mergeSenses(groups);
-  const sentences = mergeSentences(groups);
+  let sentences = mergeSentences(groups);
   const phonetic = firstPhonetic(groups);
 
   const canAi = prefs ? aiReady(prefs.ai) : false;
@@ -231,9 +254,14 @@ async function buildCard(
   if (senses.length === 0 && canAi && prefs) {
     senses = await aiFallbackSenses(word, sentence, prefs).catch(() => []);
   }
+  // AI 兜底例句（偏好开关，默认关）：仅词典例句区为空时补位，标注须可溯源
+  if (sentences.length === 0 && canAi && prefs?.vocabAiExampleFallback && prefs) {
+    sentences = await aiFallbackSentences(word, prefs).catch(() => []);
+  }
   if (senses.length === 0 && sentences.length === 0 && !sentenceZh) return null;
 
-  const hasAi = senses.some((s) => s.source === "ai");
+  const hasAi =
+    senses.some((s) => s.source === "ai") || sentences.some((s) => s.source === "ai");
   const hasDict = senses.some((s) => s.source !== "ai");
   return {
     senses,

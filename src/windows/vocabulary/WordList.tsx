@@ -11,7 +11,7 @@
  */
 import { useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { FolderInput, Trash2 } from "lucide-react";
+import { FolderInput, MessageSquareQuote, Trash2 } from "lucide-react";
 import { Button } from "@onedict/ui/components/button";
 import {
   DropdownMenu,
@@ -44,6 +44,7 @@ export default function WordList({
   onLookup,
   onMove,
   onRemove,
+  onEditContext,
 }: {
   /** 词表（父组件已按加入时间倒序） */
   entries: VocabularyEntry[];
@@ -54,6 +55,8 @@ export default function WordList({
   onLookup: (word: string) => void;
   onMove: (entryId: string, unitId: string) => void;
   onRemove: (entryId: string) => void;
+  /** 语境管理入口（有语境的词条才有按钮；M4 隐私收口） */
+  onEditContext: (entry: VocabularyEntry) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const virtualized = entries.length > VIRTUAL_THRESHOLD;
@@ -97,6 +100,18 @@ export default function WordList({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+            {entry.context && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label="收词语境"
+                title="查看 / 编辑 / 清除收词语境"
+                onClick={() => onEditContext(entry)}
+              >
+                <MessageSquareQuote className="size-4" />
+              </Button>
+            )}
             <DropdownMenu>
               <DropdownMenuTrigger
                 className="flex size-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none"

@@ -76,6 +76,7 @@ import ReviewDialog, {
   type SessionSummary,
 } from "./vocabulary/ReviewDialog";
 import WordList from "./vocabulary/WordList";
+import ContextDialog from "./vocabulary/ContextDialog";
 
 /** 抽查抽样词数（单元抽查固定 5 词快验） */
 const CHECK_SAMPLE_SIZE = 5;
@@ -118,6 +119,8 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
   const [editDraft, setEditDraft] = useState("");
   /** 复习会话（null = 关闭） */
   const [session, setSession] = useState<ReviewSession | null>(null);
+  /** 语境管理弹窗（M4：查看 / 编辑 / 清除；entry 快照，保存后经 vocabulary-changed 刷新） */
+  const [contextEditing, setContextEditing] = useState<VocabularyEntry | null>(null);
   /** 学习统计：按天聚合的复习日志（vocabulary_review_log） */
   const [reviewLog, setReviewLog] = useState<ReviewLog>({});
   /** 单元日志：轮次 / 抽查 / 分组（vocabulary_unit_log） */
@@ -826,6 +829,7 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
                     onLookup={onLookup}
                     onMove={moveEntry}
                     onRemove={removeEntry}
+                    onEditContext={setContextEditing}
                   />
                 )}
               </div>
@@ -883,6 +887,11 @@ export default function VocabularyTab({ onLookup }: { onLookup: (word: string) =
           连续两轮无「重来」且八成词进入长间隔即视为已掌握，转入抽查维持。
         </SettingDescription>
       </SettingGroup>
+
+      {/* 语境管理弹窗（M4 隐私收口） */}
+      {contextEditing && (
+        <ContextDialog entry={contextEditing} onClose={() => setContextEditing(null)} />
+      )}
 
       {/* 学习卡弹窗 */}
       <ReviewDialog

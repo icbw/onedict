@@ -67,6 +67,10 @@ pub struct Preferences {
     pub web_external: bool,
     /// 学习卡出现时自动发音（生词本重构追加；关闭仍可点卡面发音按钮）
     pub review_auto_pronounce: bool,
+    /// 生词卡 AI 兜底例句（默认关）：词典例句区为空时由 AI 生成例句补位
+    /// （source="ai" 进独立例句区，卡面标注含 AI 兜底）。仅卡面整理管线消费。
+    #[serde(default)]
+    pub vocab_ai_example_fallback: bool,
     /// 划词触发方式：selected = 拖选/双击即触发（默认）/
     /// ctrlkey = 按住 Ctrl ≥350ms（期间无其他键/滚轮/鼠标按下）捕获当前选区 /
     /// shortcut = 全局快捷键触发（槽位 hotkeys.trigger_lookup，默认未绑定）
@@ -139,6 +143,7 @@ impl Default for Preferences {
             web_fallback_only: false,
             web_external: true,
             review_auto_pronounce: false,
+            vocab_ai_example_fallback: false,
             selection_trigger: "selected".into(),
             selection_filter_mode: "default".into(),
             selection_filter_list: Vec::new(),
@@ -955,6 +960,7 @@ pub struct PrefsPayload {
     pub web_fallback_only: bool,
     pub web_external: bool,
     pub review_auto_pronounce: bool,
+    pub vocab_ai_example_fallback: bool,
     pub selection_trigger: String,
     pub selection_filter_mode: String,
     pub selection_filter_list: Vec<String>,
@@ -995,6 +1001,7 @@ pub fn prefs_get() -> Result<PrefsPayload, String> {
         web_fallback_only: p.web_fallback_only,
         web_external: p.web_external,
         review_auto_pronounce: p.review_auto_pronounce,
+        vocab_ai_example_fallback: p.vocab_ai_example_fallback,
         selection_trigger: p.selection_trigger,
         selection_filter_mode: p.selection_filter_mode,
         selection_filter_list: p.selection_filter_list,
@@ -1103,6 +1110,17 @@ pub fn prefs_set_review_auto_pronounce(app: tauri::AppHandle, enabled: bool) {
         tracing::warn!(target: "prefs", error = %e, "prefs-changed 广播失败");
     }
     tracing::info!(target: "prefs", enabled, "review auto pronounce updated");
+}
+
+/// 保存生词卡 AI 兜底例句开关（广播 prefs-changed；卡面整理管线下次执行生效）
+#[tauri::command]
+pub fn prefs_set_vocab_ai_example_fallback(app: tauri::AppHandle, enabled: bool) {
+    update(|p| p.vocab_ai_example_fallback = enabled);
+    use tauri::Emitter;
+    if let Err(e) = app.emit("prefs-changed", ()) {
+        tracing::warn!(target: "prefs", error = %e, "prefs-changed 广播失败");
+    }
+    tracing::info!(target: "prefs", enabled, "vocab ai example fallback updated");
 }
 
 /// 保存「启动时检查更新」开关（广播 prefs-changed 即时回读；检查动作本身

@@ -14,6 +14,7 @@ import {
   Languages,
   ScanText,
   Search,
+  SpellCheck,
   Sparkles,
   WandSparkles,
 } from "lucide-react";
@@ -51,6 +52,7 @@ const BUILTIN: Record<string, { label: string; Icon: LucideIcon; icon: string; a
   search: { label: "搜索", Icon: Search, icon: "search" },
   copy: { label: "复制", Icon: ClipboardCopy, icon: "clipboard-copy" },
   refine: { label: "润色", Icon: WandSparkles, icon: "wand-sparkles", ai: true },
+  check: { label: "查检", Icon: SpellCheck, icon: "spell-check" },
 };
 
 /** 内置动作的当前图标名（lucide 命名；编辑弹窗预填用——未覆盖时显示内置图标） */
@@ -71,6 +73,7 @@ export const DEFAULT_ACTION_PREFS: ActionPref[] = [
   },
   { id: "copy", enabled: true },
   { id: "refine", enabled: false },
+  { id: "check", enabled: false },
 ];
 
 /** AI 配置就绪判定（实现随模型卡重构迁至 lib/aiConfig，此处 re-export 保持兼容） */

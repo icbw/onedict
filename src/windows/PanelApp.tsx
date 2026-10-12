@@ -31,6 +31,7 @@ import { resolveActions, type ResolvedAction } from "../lib/actions";
 import type { PanelTextEvent } from "../types/selection";
 import type { EntryContext } from "../types/vocabulary";
 import type { PrefsPayload } from "../types/prefs";
+import ActionCheck from "./panel/ActionCheck";
 import ActionGeneral from "./panel/ActionGeneral";
 import ActionTranslate from "./panel/ActionTranslate";
 import DictionaryPanel from "./panel/DictionaryPanel";
@@ -229,6 +230,15 @@ export default function PanelApp() {
     }
   }, [wordDraft, session]);
 
+  /** 清除查词结果：词头与导航栈一并归零（空词 = DictionaryPanel 清空全部帧） */
+  const clearWord = useCallback(() => {
+    setWordDraft("");
+    setSession({ seq: ++sessionSeq.current, actionId: "dict", text: "", action: undefined });
+    setNav(resetWordNav(""));
+    setInVocabulary(false);
+    setVocabHint(null);
+  }, []);
+
   // 后退/前进：cursor 在导航栈间移动并同步查词会话（仅查词会话入口可达）
   const navBack = () => {
     if (!nav.back.length) return;
@@ -301,19 +311,33 @@ export default function PanelApp() {
             </WindowButton>
             {/* 顶栏词头 = 常驻输入框（直接编辑兜底划词捕获错误格式；
                Enter/失焦提交重查，Esc 还原。宽度 = 标题栏一半——占满会吃掉拖拽区；
-               输入框区域不参与窗口拖拽，bar 其余区域可拖） */}
-            <Input
-              value={wordDraft}
-              onChange={(e) => setWordDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") commitWordEdit();
-                else if (e.key === "Escape") setWordDraft(word);
-              }}
-              onBlur={commitWordEdit}
-              spellCheck={false}
-              title="查词词头：Enter 重查，Esc 还原"
-              className="ml-1 h-6 w-1/2 min-w-0 bg-white px-1.5 py-0 text-sm"
-            />
+               输入框区域不参与窗口拖拽，bar 其余区域可拖；非空时右侧清除按钮归零
+               词头与结果） */}
+            <div className="relative ml-1 w-1/2 min-w-0">
+              <Input
+                value={wordDraft}
+                onChange={(e) => setWordDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitWordEdit();
+                  else if (e.key === "Escape") setWordDraft(word);
+                }}
+                onBlur={commitWordEdit}
+                spellCheck={false}
+                title="查词词头：Enter 重查，Esc 还原"
+                className="h-6 w-full bg-white px-1.5 py-0 pr-6 text-sm"
+              />
+              {wordDraft && (
+                <button
+                  type="button"
+                  aria-label="清除查词结果"
+                  title="清除查词结果"
+                  onClick={clearWord}
+                  className="absolute top-1/2 right-1.5 -translate-y-1/2 cursor-pointer rounded-sm p-0.5 text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
+                >
+                  <X className="size-3" />
+                </button>
+              )}
+            </div>
           </>
         ) : (
           <span
@@ -390,18 +414,26 @@ export default function PanelApp() {
             />
           </div>
         )}
-        {!isDict && session.action && session.actionId !== "translate" && (
+        {!isDict && session.action && session.actionId === "check" && (
           <div className="p-4">
-            <ActionGeneral
-              key={aiSessionKey}
-              actionId={session.actionId}
-              text={session.text}
-              prompt={session.action.prompt}
-              model={session.action.model}
-              allowThink={session.action.allowThink}
-            />
+            <ActionCheck key={aiSessionKey} text={session.text} />
           </div>
         )}
+        {!isDict &&
+          session.action &&
+          session.actionId !== "translate" &&
+          session.actionId !== "check" && (
+            <div className="p-4">
+              <ActionGeneral
+                key={aiSessionKey}
+                actionId={session.actionId}
+                text={session.text}
+                prompt={session.action.prompt}
+                model={session.action.model}
+                allowThink={session.action.allowThink}
+              />
+            </div>
+          )}
       </div>
     </div>
   );

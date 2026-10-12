@@ -6,7 +6,7 @@
 //! 无法解密**（DPAPI 用户级绑定），需在设置页重填 Key（设计边界，UI 已提示）。
 //!
 //! 恢复语义 = **覆盖式**（回到备份时点）：白名单文件逐个原子写回 app_data_dir，
-//! 然后 prefs 重入 init + 三个 store 整 state 重读 + 全量广播（前端各页重拉）。
+//! 然后 prefs 重入 init + 各 store 整 state 重读 + 全量广播（前端各页重拉）。
 //!
 //! 安全面：restore 的 files key 走白名单（BACKUP_FILES），备份内容不落到
 //! data_dir 之外的任何路径；目标路径来自前端文件对话框（用户本人操作）。
@@ -17,6 +17,7 @@ use std::path::Path;
 use serde::Serialize;
 use tauri::Manager;
 
+use crate::check::{CheckSessionStore, CheckTermsStore};
 use crate::history::HistoryStore;
 use crate::history::translate::TranslateHistoryStore;
 use crate::vocabulary::{INBOX_UNIT_ID, VocabularyStore};
@@ -29,6 +30,8 @@ const BACKUP_FILES: &[&str] = &[
     "translate-history.json",
     "review-log.json",
     "unit-log.json",
+    "check-terms.json",
+    "check-session.json",
 ];
 
 /// 备份容器版本：v1 = 仅文本数据文件；v2 = 追加可选 `cache`（词典索引缓存，
@@ -340,9 +343,13 @@ pub fn data_restore(path: String, app: tauri::AppHandle) -> Result<RestoreStats,
         .reload_from(dir.join("review-log.json"))?;
     app.state::<crate::unitlog::UnitLogStore>()
         .reload_from(dir.join("unit-log.json"))?;
+    app.state::<CheckTermsStore>()
+        .reload_from(dir.join("check-terms.json"))?;
+    app.state::<CheckSessionStore>()
+        .reload_from(dir.join("check-session.json"))?;
     app.state::<crate::dictionary::Registry>().reset();
 
-    // 全量广播：设置页/生词本/历史/词典页监听重拉
+    // 全量广播：设置页/生词本/历史/词典/检查页监听重拉
     use tauri::Emitter;
     for event in [
         "prefs-changed",
@@ -350,6 +357,8 @@ pub fn data_restore(path: String, app: tauri::AppHandle) -> Result<RestoreStats,
         "vocabulary-changed",
         "history-changed",
         "translate-history-changed",
+        "check-terms-changed",
+        "check-session-changed",
     ] {
         if let Err(e) = app.emit(event, ()) {
             tracing::warn!(target: "data", event, error = %e, "恢复后广播失败");
@@ -374,12 +383,16 @@ fn csv_escape(s: &str) -> String {
 /// 生词本导出 Anki 可导入 CSV（UTF-8 BOM + CRLF，Excel 直开不乱码）。
 /// 列：word, note, unit, addedAt, dueAt, easeFactor, intervalDays, repetitions,
 ///     reviewCount, lapses, lastReviewedAt（时间 = epoch ms；Anki 导入仅映射
-///     word/note 列，其余为留档元数据）。返回导出条数。
+///     word/note 列，其余为留档元数据）。include_context = true 时尾部追加
+///     contextSentence, contextSourceApp 两列（语境属用户私有内容，默认不带；
+///     尾部追加不破坏既有按列号映射的导入模板）。返回导出条数。
 #[tauri::command]
 pub fn vocabulary_export_anki(
     path: String,
+    include_context: Option<bool>,
     state: tauri::State<'_, VocabularyStore>,
 ) -> Result<usize, String> {
+    let include_context = include_context.unwrap_or(false);
     let (entries, units) = state.entries_and_units()?;
     let unit_name = |id: &str| -> String {
         units
@@ -397,9 +410,12 @@ pub fn vocabulary_export_anki(
     let mut csv = String::from(
         "\u{feff}word,note,unit,addedAt,dueAt,easeFactor,intervalDays,repetitions,reviewCount,lapses,lastReviewedAt\r\n",
     );
+    if include_context {
+        csv.push_str("contextSentence,contextSourceApp\r\n");
+    }
     for e in &entries {
-        csv.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{}\r\n",
+        let mut row = format!(
+            "{},{},{},{},{},{},{},{},{},{},{}",
             csv_escape(&e.word),
             csv_escape(&e.note),
             csv_escape(&unit_name(&e.unit_id)),
@@ -413,9 +429,18 @@ pub fn vocabulary_export_anki(
             e.last_reviewed_at
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
-        ));
+        );
+        if include_context {
+            let (sentence, source_app) = match &e.context {
+                Some(ctx) => (ctx.sentence.as_str(), ctx.source_app.as_deref().unwrap_or("")),
+                None => ("", ""),
+            };
+            row.push_str(&format!(",{},{}", csv_escape(sentence), csv_escape(source_app)));
+        }
+        row.push_str("\r\n");
+        csv.push_str(&row);
     }
     crate::fsutil::write_atomic(Path::new(&path), &csv)?;
-    tracing::info!(target: "data", count = entries.len(), to = %path, "Anki CSV 导出完成");
+    tracing::info!(target: "data", count = entries.len(), include_context, to = %path, "Anki CSV 导出完成");
     Ok(entries.len())
 }

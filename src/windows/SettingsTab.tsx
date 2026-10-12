@@ -901,6 +901,8 @@ function PronounceSection({ prefsTick = 0 }: { prefsTick?: number }) {
 function ModelsSection({ active = true }: { active?: boolean }) {
   const [ai, setAi] = useState<AiPrefs | null>(null);
   const [editing, setEditing] = useState<ProviderPreset | null>(null);
+  /** 生词卡 AI 兜底例句开关（默认关；null = 偏好未读到，不渲染开关） */
+  const [vocabAiExample, setVocabAiExample] = useState<boolean | null>(null);
   /** 首帧偏好加载完成（用户实测：启动即点模型卡弹窗读到空 ai 显示
    *  未配置，切 tab 才加载——网格在就绪前渲染占位，杜绝过早打开弹窗） */
   const [loaded, setLoaded] = useState(false);
@@ -924,7 +926,17 @@ function ModelsSection({ active = true }: { active?: boolean }) {
         retriedRef.current = true;
         setTimeout(load, 500);
       });
+    void invoke<PrefsPayload>("prefs_get")
+      .then((p) => setVocabAiExample(p.vocabAiExampleFallback))
+      .catch(() => {});
   }, []);
+
+  const toggleVocabAiExample = (v: boolean) => {
+    setVocabAiExample(v);
+    void invoke("prefs_set_vocab_ai_example_fallback", { enabled: v }).catch(() =>
+      setVocabAiExample(!v),
+    );
+  };
 
   useEffect(() => {
     load();
@@ -1027,6 +1039,21 @@ function ModelsSection({ active = true }: { active?: boolean }) {
           </Tooltip>
         </div>
       </SettingGroup>
+
+      {/* 生词卡内容策略（AI 兜底例句；卡面整理管线消费） */}
+      {vocabAiExample !== null && (
+        <SettingGroup>
+          <SettingTitle>生词卡</SettingTitle>
+          <SettingRow className="mt-3">
+            <SettingRowTitle>AI 兜底例句</SettingRowTitle>
+            <Switch checked={vocabAiExample} onCheckedChange={toggleVocabAiExample} />
+          </SettingRow>
+          <SettingDescription>
+            词典未提供例句的词条（如未收录词组）由 AI 生成例句补位，默认关闭；
+            生成的例句在卡面标注 AI 来源。
+          </SettingDescription>
+        </SettingGroup>
+      )}
 
       <ProviderDialog
         preset={editing}
@@ -2539,6 +2566,8 @@ function HotkeyRow({
 function DataSection() {
   const [busy, setBusy] = useState<string | null>(null);
   const [hint, setHint] = useState<{ text: string; kind: "success" | "error" } | null>(null);
+  /** Anki 导出包含语境列（本地态不落偏好：语境属私有内容，默认不带，勾选即本次生效） */
+  const [ankiContext, setAnkiContext] = useState(false);
   /** 数据存储位置：dir = 用户数据目录；cacheDir = 词典缓存目录
    *  （固定安装目录）；portable = 便携标记生效；custom = 位置指针生效。null = 查询中 */
   const [loc, setLoc] = useState<{
@@ -2661,7 +2690,10 @@ function DataSection() {
       });
       if (!path) return;
       setBusy("anki");
-      const count = await invoke<number>("vocabulary_export_anki", { path });
+      const count = await invoke<number>("vocabulary_export_anki", {
+        path,
+        includeContext: ankiContext,
+      });
       setHint({ text: `已导出 ${count} 条生词到 ${path}`, kind: "success" });
     } catch (e) {
       setHint({ text: `导出失败：${String(e)}`, kind: "error" });
@@ -2819,6 +2851,15 @@ function DataSection() {
             >
               {busy === "anki" ? "导出中…" : "导出…"}
             </Button>
+          </Tooltip>
+        </SettingRow>
+        <SettingRow>
+          <SettingRowTitle>包含语境列</SettingRowTitle>
+          <Tooltip
+            content="勾选后 CSV 尾部追加 contextSentence / contextSourceApp 两列（收词原句与来源应用）；语境可能含私有内容，默认不带。"
+            placement="top"
+          >
+            <Switch checked={ankiContext} onCheckedChange={setAnkiContext} />
           </Tooltip>
         </SettingRow>
       </SettingGroup>

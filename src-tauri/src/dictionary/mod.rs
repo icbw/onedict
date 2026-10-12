@@ -284,6 +284,37 @@ impl Registry {
             .unwrap_or(false)
     }
 
+    /// 拼写检查存在性批量探针：每个候选词在全部**已启用**词典的 key 索引上
+    /// 二分判定（has_word，不解压记录块），任一词典命中即视为存在。
+    /// 纯中文词典用高频英文词探针排除——否则所有英文词都会被判「未收录」，
+    /// 拼写层变成全量误报。无启用词典报错，调用方据此跳过拼写层。
+    pub fn has_words(&self, words: &[String]) -> Result<Vec<bool>, String> {
+        let root = self.ensure_root()?;
+        let enabled: Vec<String> = self
+            .merged_items(&root)?
+            .into_iter()
+            .filter(|&(_, enabled)| enabled)
+            .map(|(id, _)| id)
+            .collect();
+        if enabled.is_empty() {
+            return Err("没有已启用的词典".into());
+        }
+        let mut found = vec![false; words.len()];
+        for id in &enabled {
+            self.with_dict(id, |d| {
+                if looks_english(d) {
+                    for (i, w) in words.iter().enumerate() {
+                        if !found[i] && d.has_word(w) {
+                            found[i] = true;
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        Ok(found)
+    }
+
     /// 后台预热单轮（在低优先级线程内由 `spawn_warmup` 调用）：
     /// 仅遍历启用词典——已缓存毫秒级装入注册表；未缓存的就地解析并写缓存——
     /// 解析为 CPU 密集，调用方已保证延迟启动 + 本线程已降优先级，不影响前台。
@@ -453,6 +484,14 @@ pub fn dictionary_load(
 /// 否则「词前后有空格查不到」。大小写折叠由引擎内置（opendict lookup）。
 fn normalize_query(word: &str) -> String {
     word.trim().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 英文词典探针（拼写检查用）：8 个高频英文词命中 ≥3 视为含英文词头。
+/// 每词典 8 次索引二分，微秒级。判不了定时宁可放行——误放行只是少了拼写
+/// 提示，误排除则该词典全量误报。
+fn looks_english(d: &MdictDictionary) -> bool {
+    const PROBES: [&str; 8] = ["the", "and", "of", "to", "in", "is", "for", "with"];
+    PROBES.iter().filter(|p| d.has_word(p)).count() >= 3
 }
 
 /// MDict 紧凑格式标记还原：把词条文本中的 `` `N` `` 占位符展开为 StyleSheet

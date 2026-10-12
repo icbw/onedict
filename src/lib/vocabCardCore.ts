@@ -123,3 +123,37 @@ export function parseAiSenses(response: string): CardSense[] {
   }
   return out;
 }
+
+/** AI 兜底例句输出宽松解析（与 parseAiSenses 同风格）：en 必需、zh 可缺，
+ *  逐项过滤不得整体失败；source="ai"（卡面兜底标注依据）。 */
+export function parseAiSentences(response: string): CardSentence[] {
+  const trimmed = response.trim();
+  const body = trimmed.startsWith("```")
+    ? trimmed
+        .replace(/^`+/, "")
+        .replace(/`+$/, "")
+        .replace(/^[a-z]*/i, "")
+        .trim()
+    : trimmed;
+  const start = body.indexOf("{");
+  const end = body.lastIndexOf("}");
+  if (start < 0 || end <= start) return [];
+  let raw: { sentences?: unknown };
+  try {
+    raw = JSON.parse(body.slice(start, end + 1));
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(raw.sentences)) return [];
+  const out: CardSentence[] = [];
+  for (const v of raw.sentences) {
+    if (typeof v !== "object" || v === null) continue;
+    const o = v as Record<string, unknown>;
+    const en = typeof o.en === "string" ? o.en.trim() : "";
+    if (!en) continue;
+    const zh = typeof o.zh === "string" ? o.zh.trim() : "";
+    out.push({ en: en.slice(0, 240), zh: zh ? zh.slice(0, 240) : null, source: "ai" });
+    if (out.length >= SENTENCES_MAX) break;
+  }
+  return out;
+}

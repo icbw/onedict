@@ -12,9 +12,15 @@
  * 1. 朗读按钮映射命中且类型匹配 → 用它（仅双按钮入口传入）；
  * 2. 否则按 语言-口音 取女声槽（zh→zh-f；en+英→en-gb-f；en+美→en-us-f）——
  *    无按钮入口（词条发音兜底 / 生词卡 / 截图朗读）走这一条；
- * 3. **Edge 通道到此为止**（返回 undefined，由朗读链降级到本机引擎）；
- *    本机通道再退一步：按语言（+ 按钮性别）挑本机语音，挑不到交系统默认语音。
+ * 3. 槽未命中该类型的音色时**自动挑选**（两条通道对称）：Edge 通道按
+ *    语言-口音前缀挑在线语音（列表拉取失败才放弃）；本机通道按语言（+ 按钮
+ *    性别）挑本机语音，挑不到交系统默认语音。
+ *    ——链（wordChain/sentenceChain）才是引擎开关：链里启用 edge 就尽量用
+ *    在线引擎，槽只决定音色；槽缺失 / 类型不符 / 消费端 state 陈旧都不该
+ *    让引擎静默换掉——否则会出现「设置页试听（直连槽）正常、实际朗读
+ *    （走链）降级系统音」的行为背离，且降级无声无从排查。
  */
+import { listEdgeVoices } from "./edgeTts";
 import { detectLang, listVoices, type TextLang, type VoiceInfo } from "./tts";
 import type { PronouncePrefs } from "../types/prefs";
 
@@ -156,10 +162,21 @@ export async function resolveVoiceForSource(
     const slot = parseSlotValue(prefs.voiceSlots?.[key]);
     if (slot && slot.kind === want) return slot.id;
   }
-  // 槽里没有该类型的音源（缺失 / 类型不符）→ **不再另挑同类音色**：
-  // Edge 通道就此打住，由朗读链降级到本机引擎（系统语音），
-  // 本机通道再按语言（+ 按钮性别）挑本机语音，挑不到交系统默认语音
-  if (want === "edge") return undefined;
+  // 槽未命中该类型音色 → 自动挑选（两通道对称，见文件头注释）：
+  // - Edge：按 语言-口音 locale 前缀挑在线语音（尊重口音提示；非中英文本 /
+  //   语音列表拉取失败 → undefined，由朗读链降级本机引擎）；
+  // - 本机：按语言（+ 按钮性别）挑本机语音，挑不到交系统默认语音。
+  if (want === "edge") {
+    try {
+      const voices = await listEdgeVoices();
+      const match = prefix
+        ? voices.find((v) => v.locale.toLowerCase().startsWith(prefix))
+        : undefined;
+      return match?.shortName;
+    } catch {
+      return undefined;
+    }
+  }
   const gender = button?.gender ?? "";
   const voices = await listVoices().catch(() => [] as VoiceInfo[]);
   return pickLocal(voices, prefix, gender);

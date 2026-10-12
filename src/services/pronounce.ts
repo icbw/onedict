@@ -107,6 +107,7 @@ export async function speakWord(word: string, ctx: WordContext): Promise<void> {
   stopSpeaking();
   const report = ctx.onStatus ?? (() => {});
   const failures: string[] = [];
+  let edgeFailed = false;
   for (const source of wordChainOf(ctx.prefs)) {
     if (source === "dict") {
       if (!ctx.loadDictSound) continue;
@@ -141,6 +142,7 @@ export async function speakWord(word: string, ctx: WordContext): Promise<void> {
         report({ text: "在线语音合成中…", kind: "info" });
         const voice = await resolveVoiceForSource(target, ctx.prefs, "edge", ctx.accent ?? "");
         if (!voice) {
+          edgeFailed = true;
           failures.push("在线语音未配置（六槽里没有 Edge 音源）");
           continue;
         }
@@ -149,13 +151,20 @@ export async function speakWord(word: string, ctx: WordContext): Promise<void> {
         await playSoundData(data);
         return;
       } catch (e) {
+        // Edge 接口存在秒级失败窗口（限流 / 端点抖动），降级本机时把原因留在
+        // 提示位——「时好时坏」若无迹可循即无从理解（Rust 侧已 WARN + 重试）
+        edgeFailed = true;
         failures.push(`在线语音（${errText(e)}）`);
       }
     } else if (source === "tts") {
       try {
         report({ text: "系统语音合成中…", kind: "info" });
         await speakViaTts(target, ctx.prefs, ctx.accent ?? "");
-        report(null);
+        report(
+          edgeFailed
+            ? { text: "在线语音不可用，已改用系统语音", kind: "info" }
+            : null,
+        );
         return;
       } catch (e) {
         failures.push(`系统语音（${errText(e)}）`);
@@ -180,12 +189,14 @@ export async function speakSentence(
   const target = text.trim();
   if (!target) return;
   const failures: string[] = [];
+  let edgeFailed = false;
   for (const source of sentenceChainOf(prefs)) {
     if (source === "edge") {
       try {
         onStatus?.({ text: "在线语音合成中…", kind: "info" });
         const voice = await resolveVoiceForSource(target, prefs, "edge", "", button);
         if (!voice) {
+          edgeFailed = true;
           failures.push("在线语音未配置（六槽里没有 Edge 音源）");
           continue;
         }
@@ -193,6 +204,7 @@ export async function speakSentence(
         onStatus?.(null);
         return;
       } catch (e) {
+        edgeFailed = true;
         failures.push(`在线语音（${errText(e)}）`);
       }
     } else if (source === "tts") {
@@ -200,7 +212,11 @@ export async function speakSentence(
         onStatus?.({ text: "系统语音合成中…", kind: "info" });
         const voiceId = await resolveVoiceForSource(target, prefs, "local", "", button);
         await speakQueued(target, { voiceId, rate: prefs.rate });
-        onStatus?.(null);
+        onStatus?.(
+          edgeFailed
+            ? { text: "在线语音不可用，已改用系统语音", kind: "info" }
+            : null,
+        );
         return;
       } catch (e) {
         failures.push(`系统语音（${errText(e)}）`);

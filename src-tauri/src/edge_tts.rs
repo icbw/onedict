@@ -235,6 +235,33 @@ fn synthesize_blocking(text: &str, voice: &str, rate: f32) -> Result<Vec<u8>, St
     Ok(audio)
 }
 
+/// 阻塞合成 + 瞬时故障快速重试：非官方接口存在秒级失败窗口（服务端限流 /
+/// 端点抖动，表现为连续数十秒失败后自愈），单次失败即降级本机会让在线引擎
+/// 「时好时坏」。连接 / 握手 / 读写类瞬时错误退避 300ms 重试一次；EMPTY
+/// （服务端明确拒绝）与 TIMEOUT（长卡死）不重试。失败一律 WARN 上日志——
+/// 此前失败只回传前端且被降级吞掉，线上排查无迹。
+fn synthesize_with_retry(text: &str, voice: &str, rate: f32) -> Result<Vec<u8>, String> {
+    let t0 = std::time::Instant::now();
+    match synthesize_blocking(text, voice, rate) {
+        Ok(audio) => Ok(audio),
+        Err(e) if e.starts_with("EDGE_TTS_CONNECT")
+            || e.starts_with("EDGE_TTS_SEND")
+            || e.starts_with("EDGE_TTS_READ") =>
+        {
+            tracing::warn!(target: "edge_tts", error = %e, elapsed_ms = t0.elapsed().as_millis() as u64, "Edge 合成瞬时失败，重试一次");
+            std::thread::sleep(Duration::from_millis(300));
+            synthesize_blocking(text, voice, rate).map_err(|retry| {
+                tracing::warn!(target: "edge_tts", error = %retry, "Edge 合成重试仍失败");
+                retry
+            })
+        }
+        Err(e) => {
+            tracing::warn!(target: "edge_tts", error = %e, "Edge 合成失败");
+            Err(e)
+        }
+    }
+}
+
 /// 在线语音清单（设置页下拉；列表接口 5 分钟内无变化，前端会话缓存即可）
 #[tauri::command]
 pub async fn edge_tts_voices() -> Result<Vec<EdgeVoice>, String> {
@@ -289,7 +316,7 @@ pub async fn edge_tts_synthesize(
     let rate = rate.unwrap_or(1.0);
     let voice = voice.trim().to_string();
     let audio = tauri::async_runtime::spawn_blocking(move || {
-        synthesize_blocking(&text, &voice, rate)
+        synthesize_with_retry(&text, &voice, rate)
     })
     .await
     .map_err(|e| format!("EDGE_TTS_TASK:{e}"))??;

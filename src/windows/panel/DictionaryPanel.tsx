@@ -348,7 +348,18 @@ export default function DictionaryPanel({
    *    属于故障，兜底时把原因一并上屏——静默换音源会让用户以为播的是本地真人音，
    *    真实原因也再无迹可循。
    * 音频一律回帧播放（帧内播放被拒 / 停滞经 onedict-sound-error 上屏）。
+   * pronounce state 未就绪（挂载初期竞态）时懒拉一次兜底，不静默吞点击。
    */
+  const loadPronounce = useCallback(async (): Promise<PronouncePrefs | null> => {
+    if (pronounce) return pronounce;
+    try {
+      const p = await invoke<PrefsPayload>("prefs_get");
+      return p.pronounce ?? null;
+    } catch {
+      return null;
+    }
+  }, [pronounce]);
+
   const handleFrameAudio = useCallback(
     async (
       dictId: string,
@@ -358,7 +369,7 @@ export default function DictionaryPanel({
       speakText: string,
       accent: Accent,
     ) => {
-      const prefs = pronounce;
+      const prefs = await loadPronounce();
       // 合成源 = Edge 在线自然语音 / 本地系统语音（任一在链中即具备兜底能力）
       const synthEnabled = prefs
         ? wordChainOf(prefs).some((s) => s === "edge" || s === "tts")
@@ -413,15 +424,18 @@ export default function DictionaryPanel({
         reportSound({ text: msg, kind: "error" });
       }
     },
-    [pronounce, word, reportSound, ensureSpx],
+    [loadPronounce, word, reportSound, ensureSpx],
   );
 
   /** 帧内例句朗读按钮（`say://`）：按「句子」场景 + 按钮槽合成 → 回帧播放
    *  （同音频通道；按钮 a / b 的音色由设置页「朗读按钮」分配） */
   const handleFrameSpeak = useCallback(
     async (dictId: string, seq: unknown, text: string, which: "a" | "b") => {
-      const prefs = pronounce;
-      if (!prefs) return;
+      const prefs = await loadPronounce();
+      if (!prefs) {
+        reportSound({ text: "发音偏好未就绪，请重试", kind: "error" });
+        return;
+      }
       try {
         reportSound({ text: "语音合成中…", kind: "info" });
         const button = sayButtonsOf(prefs)[which === "b" ? 1 : 0];
@@ -433,7 +447,7 @@ export default function DictionaryPanel({
         reportSound({ text: err instanceof Error ? err.message : String(err), kind: "error" });
       }
     },
-    [pronounce, reportSound],
+    [loadPronounce, reportSound],
   );
 
   // iframe 消息：entry:// 重查 + 高度上报（token 门禁）+ sound:// 播放（event.source

@@ -1,5 +1,6 @@
 mod ai;
 mod autostart;
+mod check;
 mod data;
 mod dictionary;
 mod edge_tts;
@@ -39,16 +40,17 @@ pub fn run() {
         }
     };
     let mut builder = tauri::Builder::default();
-    // 四 store 先行注册：DictionaryTab / VocabularyTab / TranslateTab 为 keep-alive
-    // 常挂载页，挂载即调 history_list / vocabulary_list / vocabulary_review_log /
-    // translate_history_list——晚于页面加载注册即首载化石态
+    // store 先行注册：DictionaryTab / VocabularyTab / TranslateTab / CheckTab 为
+    // keep-alive 常挂载页，挂载即拉数据——晚于页面加载注册即首载化石态
     if let Some(dir) = &early_dir {
         builder = builder
             .manage(vocabulary::VocabularyStore::open(dir))
             .manage(reviewlog::ReviewLogStore::open(dir))
             .manage(unitlog::UnitLogStore::open(dir))
             .manage(history::HistoryStore::open(dir))
-            .manage(history::translate::TranslateHistoryStore::open(dir));
+            .manage(history::translate::TranslateHistoryStore::open(dir))
+            .manage(check::CheckTermsStore::open(dir))
+            .manage(check::CheckSessionStore::open(dir));
     }
     builder
         //  单实例（须最先注册）：第二实例启动即退出并聚焦已有主窗口——
@@ -152,6 +154,13 @@ pub fn run() {
             if app.try_state::<history::translate::TranslateHistoryStore>().is_none() {
                 app.manage(history::translate::TranslateHistoryStore::open(&data_dir));
             }
+            //  语言检查数据（app_data_dir()/check-terms.json + check-session.json）
+            if app.try_state::<check::CheckTermsStore>().is_none() {
+                app.manage(check::CheckTermsStore::open(&data_dir));
+            }
+            if app.try_state::<check::CheckSessionStore>().is_none() {
+                app.manage(check::CheckSessionStore::open(&data_dir));
+            }
             selection::init(app.handle().clone());
             selection::restore_from_prefs();
             //  收尾：托盘常驻（左键显示主窗，右键菜单 显示/划词开关/退出）。
@@ -186,6 +195,7 @@ pub fn run() {
             vocabulary::vocabulary_card_generate,
             vocabulary::vocabulary_entry,
             vocabulary::vocabulary_card_set,
+            vocabulary::vocabulary_context_set,
             vocabulary::vocabulary_remove,
             vocabulary::vocabulary_review,
             vocabulary::vocabulary_unit_list,
@@ -206,6 +216,16 @@ pub fn run() {
             history::translate::translate_history_list,
             history::translate::translate_history_add,
             history::translate::translate_history_clear,
+            check::check_terms_get,
+            check::check_terms_save,
+            check::check_whitelist_add,
+            check::check_whitelist_remove,
+            check::check_ignored_add,
+            check::check_ignored_remove,
+            check::check_session_save,
+            check::check_session_list,
+            check::check_session_clear,
+            check::check_spell_lookup,
             selection::selection_open_panel,
             selection::expand::selection_expand_context,
             selection::selection_set_panel_pinned,
@@ -234,6 +254,7 @@ pub fn run() {
             prefs::prefs_set_translate_config,
             prefs::prefs_set_hotkeys,
             prefs::prefs_set_review_auto_pronounce,
+            prefs::prefs_set_vocab_ai_example_fallback,
             prefs::prefs_set_web_external,
             prefs::prefs_set_ocr_lang,
             prefs::prefs_set_ocr_target_lang,
